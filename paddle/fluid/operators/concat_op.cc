@@ -16,6 +16,10 @@ limitations under the License. */
 
 #include <string>
 #include <vector>
+#ifdef PADDLE_WITH_MKLDNN
+#include "paddle/fluid/platform/mkldnn_helper.h"
+#endif
+
 
 namespace paddle {
 namespace operators {
@@ -59,6 +63,27 @@ class ConcatOp : public framework::OperatorWithKernel {
     ctx->SetOutputDim("Out", out_dims);
     ctx->ShareLoD("X", /*->*/ "Out");
   }
+
+protected:
+  framework::OpKernelType GetExpectedKernelType(
+      const framework::ExecutionContext& ctx) const override {
+  framework::LibraryType library_{framework::LibraryType::kPlain};
+  framework::DataLayout layout_{framework::DataLayout::kAnyLayout};
+
+#ifdef PADDLE_WITH_MKLDNN
+  if (library_ == framework::LibraryType::kPlain &&
+      platform::CanMKLDNNBeUsed(ctx)) {
+    library_ = framework::LibraryType::kMKLDNN;
+    layout_ = framework::DataLayout::kMKLDNN;
+  }
+#endif
+
+  auto input_data_type =
+      framework::ToDataType(ctx.MultiInput<framework::Tensor>("X")[0]->type());
+  return framework::OpKernelType(
+      input_data_type, ctx.GetPlace(),
+      layout_, library_);
+}
 };
 
 class ConcatOpMaker : public framework::OpProtoAndCheckerMaker {
@@ -69,6 +94,9 @@ class ConcatOpMaker : public framework::OpProtoAndCheckerMaker {
     AddAttr<int>("axis",
                  "The axis along which the input tensors will be concatenated.")
         .SetDefault(0);
+    AddAttr<bool>("use_mkldnn",
+                  "(bool, default false) Only used in mkldnn kernel")
+        .SetDefault(false);
     AddComment(R"DOC(
 Concat Operator.
 

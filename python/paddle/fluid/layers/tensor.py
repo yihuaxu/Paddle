@@ -171,7 +171,7 @@ def cast(x, dtype):
     return out
 
 
-def concat(input, axis=0, name=None):
+def concat(input, axis=0, use_mkldnn=False, name=None):
     """
     **Concat**
 
@@ -198,7 +198,8 @@ def concat(input, axis=0, name=None):
         type='concat',
         inputs={'X': input},
         outputs={'Out': [out]},
-        attrs={'axis': axis})
+        attrs={'axis': axis,
+               'use_mkldnn': use_mkldnn})
     return out
 
 
