@@ -53,15 +53,6 @@ class ConcatMKLDNNKernel : public framework::OpKernel<T> {
   }
 
  private:
-  std::unique_ptr<mkldnn::concat::primitive_desc> CreatePrimitiveDesc(
-      std::vector<memory::primitive_desc>& srcs_pd,
-      const mkldnn::memory::desc& dst_md,
-      const int& axis) const {
-    auto p_concat_pd =
-        new concat::primitive_desc(dst_md, static_cast<int>(axis), srcs_pd);
-    return std::unique_ptr<concat::primitive_desc>(p_concat_pd);
-  }
-
   void MKLDNNConcatCompute(const framework::ExecutionContext& ctx,
         const std::vector<const framework::Tensor*> ins,
         framework::Tensor* output,
