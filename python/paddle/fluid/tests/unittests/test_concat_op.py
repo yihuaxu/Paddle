@@ -20,9 +20,12 @@ from op_test import OpTest
 class TestConcatOp(OpTest):
     def setUp(self):
         self.op_type = "concat"
+        self.use_mkldnn = False
         self.init_test_data()
+        self.init_kernel_type()
         self.inputs = {'X': [('x0', self.x0), ('x1', self.x1), ('x2', self.x2)]}
-        self.attrs = {'axis': self.axis}
+        self.attrs = {'axis': self.axis,
+                      "use_mkldnn": self.use_mkldnn}
         self.outputs = {
             'Out': np.concatenate(
                 (self.x0, self.x1, self.x2), axis=self.axis)
@@ -41,6 +44,9 @@ class TestConcatOp(OpTest):
         self.x1 = np.random.random((2, 2, 4, 5)).astype('float32')
         self.x2 = np.random.random((2, 3, 4, 5)).astype('float32')
         self.axis = 1
+
+    def init_kernel_type(self):
+        pass
 
 
 class TestConcatOp2(TestConcatOp):
