@@ -30,35 +30,12 @@ template <typename T>
 class ConcatMKLDNNKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    auto ins = ctx.MultiInput<framework::Tensor>("X");
-    framework::Tensor* out = ctx.Output<framework::Tensor>("Out");
-    int64_t axis = static_cast<int64_t>(ctx.Attr<int>("axis"));
-
-    // Sometimes direct copies will be faster, this maybe need deeply analysis.
-    if (axis == 0 && ins.size() < 10) {
-        auto place = ctx.GetPlace();
-        out->mutable_data<T>(place);
-        size_t output_offset = 0;
-        for (auto* in : ins) {
-            auto in_stride = framework::stride_numel(in->dims());
-            auto out_stride = framework::stride_numel(out->dims());
-            StridedNumelCopyWithAxis<T>(ctx.device_context(), axis,
-                                    out->data<T>() + output_offset, out_stride,
-                                    in->data<T>(), in_stride, in_stride[axis]);
-            output_offset += in_stride[axis];
-        }
-    } else {
-        MKLDNNConcatCompute(ctx, ins, out, axis);
-    }
-  }
-
- private:
-  void MKLDNNConcatCompute(const framework::ExecutionContext& ctx,
-        const std::vector<const framework::Tensor*> ins,
-        framework::Tensor* output,
-        int64_t axis) const{
     PADDLE_ENFORCE(paddle::platform::is_cpu_place(ctx.GetPlace()),
                    "It must use CPUPlace.");
+
+    auto ins = ctx.MultiInput<framework::Tensor>("X");
+    framework::Tensor* output = ctx.Output<framework::Tensor>("Out");
+    int64_t axis = static_cast<int64_t>(ctx.Attr<int>("axis"));
 
     auto& dev_ctx =
         ctx.template device_context<platform::MKLDNNDeviceContext>();
@@ -120,6 +97,7 @@ class ConcatMKLDNNKernel : public framework::OpKernel<T> {
 
     output->set_layout(DataLayout::kMKLDNN);
     output->set_format(output_format);
+
   }
 };
 
