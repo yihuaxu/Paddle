@@ -528,7 +528,7 @@ inline void vec_sigmoid<float, platform::jit::avx>(const int n, const float* x,
 #ifdef __AVX__
   constexpr int block = AVX_FLOAT_BLOCK;
   if (n < block) {
-    vec_sigmoid<float>(n, x, y);
+    vec_sigmoid<float, platform::jit::isa_any>(n, x, y);
     return;
   }
   const int rest = n % block;
@@ -554,7 +554,7 @@ inline void vec_sigmoid<float, platform::jit::avx>(const int n, const float* x,
 
 #undef MOVE_ONE_STEP
 #define MOVE_ONE_STEP           \
-  tmp = _mm256_loadu_ps(x + i); \
+  tmp = _mm256_loadu_ps(y + i); \
   tmp = exp256_ps(tmp);         \
   _mm256_storeu_ps(y + i, tmp)
   for (i = 0; i < end; i += block) {
