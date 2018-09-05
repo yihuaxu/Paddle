@@ -29,6 +29,205 @@ namespace paddle {
 namespace operators {
 namespace math {
 
+#ifdef __AVX__
+// #include "paddle/legacy/cuda/src/avx_mathfun.h"
+#define ALIGN32_BEG
+#define ALIGN32_END __attribute__((aligned(32)))
+
+#define _PI32AVX_CONST(Name, Val)                                          \
+  static const ALIGN32_BEG int _pi32avx_##Name[4] ALIGN32_END = {Val, Val, \
+                                                                 Val, Val}
+
+_PI32AVX_CONST(1, 1);
+_PI32AVX_CONST(inv1, ~1);
+_PI32AVX_CONST(2, 2);
+_PI32AVX_CONST(4, 4);
+
+/* declare some AVX constants -- why can't I figure a better way to do that? */
+#define _PS256_CONST(Name, Val)                                   \
+  static const ALIGN32_BEG float _ps256_##Name[8] ALIGN32_END = { \
+      Val, Val, Val, Val, Val, Val, Val, Val}
+#define _PI32_CONST256(Name, Val)                                  \
+  static const ALIGN32_BEG int _pi32_256_##Name[8] ALIGN32_END = { \
+      Val, Val, Val, Val, Val, Val, Val, Val}
+#define _PS256_CONST_TYPE(Name, Type, Val)                       \
+  static const ALIGN32_BEG Type _ps256_##Name[8] ALIGN32_END = { \
+      Val, Val, Val, Val, Val, Val, Val, Val}
+
+_PS256_CONST(1, 1.0f);
+_PS256_CONST(0p5, 0.5f);
+/* the smallest non denormalized float number */
+_PS256_CONST_TYPE(min_norm_pos, int, 0x00800000);
+_PS256_CONST_TYPE(mant_mask, int, 0x7f800000);
+_PS256_CONST_TYPE(inv_mant_mask, int, ~0x7f800000);
+
+_PS256_CONST_TYPE(sign_mask, int, (int)0x80000000);
+_PS256_CONST_TYPE(inv_sign_mask, int, ~0x80000000);
+
+_PI32_CONST256(0, 0);
+_PI32_CONST256(1, 1);
+_PI32_CONST256(inv1, ~1);
+_PI32_CONST256(2, 2);
+_PI32_CONST256(4, 4);
+_PI32_CONST256(0x7f, 0x7f);
+
+_PS256_CONST(cephes_SQRTHF, 0.707106781186547524);
+_PS256_CONST(cephes_log_p0, 7.0376836292E-2);
+_PS256_CONST(cephes_log_p1, -1.1514610310E-1);
+_PS256_CONST(cephes_log_p2, 1.1676998740E-1);
+_PS256_CONST(cephes_log_p3, -1.2420140846E-1);
+_PS256_CONST(cephes_log_p4, +1.4249322787E-1);
+_PS256_CONST(cephes_log_p5, -1.6668057665E-1);
+_PS256_CONST(cephes_log_p6, +2.0000714765E-1);
+_PS256_CONST(cephes_log_p7, -2.4999993993E-1);
+_PS256_CONST(cephes_log_p8, +3.3333331174E-1);
+_PS256_CONST(cephes_log_q1, -2.12194440e-4);
+_PS256_CONST(cephes_log_q2, 0.693359375);
+
+_PS256_CONST(exp_hi, 88.3762626647949f);
+_PS256_CONST(exp_lo, -88.3762626647949f);
+
+_PS256_CONST(cephes_LOG2EF, 1.44269504088896341);
+_PS256_CONST(cephes_exp_C1, 0.693359375);
+_PS256_CONST(cephes_exp_C2, -2.12194440e-4);
+
+_PS256_CONST(cephes_exp_p0, 1.9875691500E-4);
+_PS256_CONST(cephes_exp_p1, 1.3981999507E-3);
+_PS256_CONST(cephes_exp_p2, 8.3334519073E-3);
+_PS256_CONST(cephes_exp_p3, 4.1665795894E-2);
+_PS256_CONST(cephes_exp_p4, 1.6666665459E-1);
+_PS256_CONST(cephes_exp_p5, 5.0000001201E-1);
+
+#ifndef __AVX2__
+typedef union imm_xmm_union {
+  __m256i imm;
+  __m128i xmm[2];
+} imm_xmm_union;
+
+#define COPY_IMM_TO_XMM(imm_, xmm0_, xmm1_)       \
+  {                                               \
+    imm_xmm_union u __attribute__((aligned(32))); \
+    u.imm = imm_;                                 \
+    xmm0_ = u.xmm[0];                             \
+    xmm1_ = u.xmm[1];                             \
+  }
+
+#define COPY_XMM_TO_IMM(xmm0_, xmm1_, imm_)       \
+  {                                               \
+    imm_xmm_union u __attribute__((aligned(32))); \
+    u.xmm[0] = xmm0_;                             \
+    u.xmm[1] = xmm1_;                             \
+    imm_ = u.imm;                                 \
+  }
+
+#define AVX2_BITOP_USING_SSE2(fn)                           \
+  static inline __m256i avx2_mm256_##fn(__m256i x, int a) { \
+    /* use SSE2 instruction to perform the bitop AVX2 */    \
+    __m128i x1, x2;                                         \
+    __m256i ret;                                            \
+    COPY_IMM_TO_XMM(x, x1, x2);                             \
+    x1 = _mm_##fn(x1, a);                                   \
+    x2 = _mm_##fn(x2, a);                                   \
+    COPY_XMM_TO_IMM(x1, x2, ret);                           \
+    return (ret);                                           \
+  }
+
+// #warning "Using SSE2 to perform AVX2 bitshift ops"
+AVX2_BITOP_USING_SSE2(slli_epi32)
+AVX2_BITOP_USING_SSE2(srli_epi32)
+
+#define AVX2_INTOP_USING_SSE2(fn)                                     \
+  static inline __m256i avx2_mm256_##fn(__m256i x, __m256i y) {       \
+    /* use SSE2 instructions to perform the AVX2 integer operation */ \
+    __m128i x1, x2;                                                   \
+    __m128i y1, y2;                                                   \
+    __m256i ret;                                                      \
+    COPY_IMM_TO_XMM(x, x1, x2);                                       \
+    COPY_IMM_TO_XMM(y, y1, y2);                                       \
+    x1 = _mm_##fn(x1, y1);                                            \
+    x2 = _mm_##fn(x2, y2);                                            \
+    COPY_XMM_TO_IMM(x1, x2, ret);                                     \
+    return (ret);                                                     \
+  }
+
+// #warning "Using SSE2 to perform AVX2 integer ops"
+AVX2_INTOP_USING_SSE2(and_si128)
+AVX2_INTOP_USING_SSE2(andnot_si128)
+AVX2_INTOP_USING_SSE2(cmpeq_epi32)
+AVX2_INTOP_USING_SSE2(sub_epi32)
+AVX2_INTOP_USING_SSE2(add_epi32)
+#define avx2_mm256_and_si256 avx2_mm256_and_si128
+#define avx2_mm256_andnot_si256 avx2_mm256_andnot_si128
+#else
+#define avx2_mm256_slli_epi32 _mm256_slli_epi32
+#define avx2_mm256_srli_epi32 _mm256_srli_epi32
+#define avx2_mm256_and_si256 _mm256_and_si256
+#define avx2_mm256_andnot_si256 _mm256_andnot_si256
+#define avx2_mm256_cmpeq_epi32 _mm256_cmpeq_epi32
+#define avx2_mm256_sub_epi32 _mm256_sub_epi32
+#define avx2_mm256_add_epi32 _mm256_add_epi32
+#endif /* __AVX2__ */
+
+inline __m256 exp256_ps(__m256 x) {
+  __m256 tmp = _mm256_setzero_ps(), fx;
+  __m256i imm0;
+  __m256 one = *reinterpret_cast<const __m256*>(_ps256_1);
+
+  x = _mm256_min_ps(x, *reinterpret_cast<const __m256*>(_ps256_exp_hi));
+  x = _mm256_max_ps(x, *reinterpret_cast<const __m256*>(_ps256_exp_lo));
+
+  /* express exp(x) as exp(g + n*log(2)) */
+  fx = _mm256_mul_ps(x, *reinterpret_cast<const __m256*>(_ps256_cephes_LOG2EF));
+  fx = _mm256_add_ps(fx, *reinterpret_cast<const __m256*>(_ps256_0p5));
+
+  /* how to perform a floorf with SSE: just below */
+  // imm0 = _mm256_cvttps_epi32(fx);
+  // tmp  = _mm256_cvtepi32_ps(imm0);
+
+  tmp = _mm256_floor_ps(fx);
+
+  /* if greater, substract 1 */
+  // __m256 mask = _mm256_cmpgt_ps(tmp, fx);
+  __m256 mask = _mm256_cmp_ps(tmp, fx, _CMP_GT_OS);
+  mask = _mm256_and_ps(mask, one);
+  fx = _mm256_sub_ps(tmp, mask);
+
+  tmp =
+      _mm256_mul_ps(fx, *reinterpret_cast<const __m256*>(_ps256_cephes_exp_C1));
+  __m256 z =
+      _mm256_mul_ps(fx, *reinterpret_cast<const __m256*>(_ps256_cephes_exp_C2));
+  x = _mm256_sub_ps(x, tmp);
+  x = _mm256_sub_ps(x, z);
+
+  z = _mm256_mul_ps(x, x);
+
+  __m256 y = *reinterpret_cast<const __m256*>(_ps256_cephes_exp_p0);
+  y = _mm256_mul_ps(y, x);
+  y = _mm256_add_ps(y, *reinterpret_cast<const __m256*>(_ps256_cephes_exp_p1));
+  y = _mm256_mul_ps(y, x);
+  y = _mm256_add_ps(y, *reinterpret_cast<const __m256*>(_ps256_cephes_exp_p2));
+  y = _mm256_mul_ps(y, x);
+  y = _mm256_add_ps(y, *reinterpret_cast<const __m256*>(_ps256_cephes_exp_p3));
+  y = _mm256_mul_ps(y, x);
+  y = _mm256_add_ps(y, *reinterpret_cast<const __m256*>(_ps256_cephes_exp_p4));
+  y = _mm256_mul_ps(y, x);
+  y = _mm256_add_ps(y, *reinterpret_cast<const __m256*>(_ps256_cephes_exp_p5));
+  y = _mm256_mul_ps(y, z);
+  y = _mm256_add_ps(y, x);
+  y = _mm256_add_ps(y, one);
+
+  /* build 2^n */
+  imm0 = _mm256_cvttps_epi32(fx);
+  // another two AVX2 instructions
+  imm0 = avx2_mm256_add_epi32(
+      imm0, *reinterpret_cast<const __m256i*>(_pi32_256_0x7f));
+  imm0 = avx2_mm256_slli_epi32(imm0, 23);
+  __m256 pow2n = _mm256_castsi256_ps(imm0);
+  y = _mm256_mul_ps(y, pow2n);
+  return y;
+}
+#endif
+
 #define SIGMOID_THRESHOLD_MIN -40.0
 #define SIGMOID_THRESHOLD_MAX 13.0
 
@@ -329,7 +528,7 @@ inline void vec_sigmoid<float, platform::jit::avx>(const int n, const float* x,
 #ifdef __AVX__
   constexpr int block = AVX_FLOAT_BLOCK;
   if (n < block) {
-    vec_sigmoid<float, platform::jit::isa_any>(n, x, y);
+    vec_sigmoid<float>(n, x, y);
     return;
   }
   const int rest = n % block;
@@ -348,17 +547,24 @@ inline void vec_sigmoid<float, platform::jit::avx>(const int n, const float* x,
   for (i = 0; i < end; i += block) {
     MOVE_ONE_STEP;
   }
-#undef MOVE_ONE_STEP
   if (rest != 0) {
-    // can not continue move step since the src and dst address could be equal
-    const float xmin = SIGMOID_THRESHOLD_MIN;
-    const float xmax = SIGMOID_THRESHOLD_MAX;
-    for (i = n - rest; i < n; ++i) {
-      y[i] = 0.f - ((x[i] < xmin) ? xmin : ((x[i] > xmax) ? xmax : x[i]));
-    }
+    i = n - block;
+    MOVE_ONE_STEP;
   }
 
-  vec_exp<float>(n, y, y);
+#undef MOVE_ONE_STEP
+#define MOVE_ONE_STEP           \
+  tmp = _mm256_loadu_ps(x + i); \
+  tmp = exp256_ps(tmp);         \
+  _mm256_storeu_ps(y + i, tmp)
+  for (i = 0; i < end; i += block) {
+    MOVE_ONE_STEP;
+  }
+  if (rest != 0) {
+    i = n - block;
+    MOVE_ONE_STEP;
+  }
+#undef MOVE_ONE_STEP
 
   __m256 ones = _mm256_set1_ps(1.0f);
 #define MOVE_ONE_STEP             \
