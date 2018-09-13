@@ -14,6 +14,7 @@
 
 #include "paddle/fluid/inference/analysis/analyzer.h"
 #include <gtest/gtest.h>
+#include <thread>  // NOLINT
 #include "paddle/fluid/framework/ir/fuse_pass_base.h"
 #include "paddle/fluid/inference/analysis/ut_helper.h"
 #include "paddle/fluid/inference/api/analysis_predictor.h"
@@ -27,6 +28,7 @@ DEFINE_int32(batch_size, 1, "batch size.");
 DEFINE_int32(burning, 0, "Burning before repeat.");
 DEFINE_int32(repeat, 1, "Running the inference program repeat times.");
 DEFINE_bool(test_all_data, false, "Test the all dataset in data file.");
+DEFINE_int32(num_threads, 1, "Running the inference program in multi-threads.");
 
 namespace paddle {
 namespace inference {
@@ -102,11 +104,27 @@ struct DataRecord {
     }
     return data;
   }
+  DataRecord GetBatch(size_t iter) {
+    if (iter >= batched_datas.size()) {
+      iter = 0;
+    }
+    DataRecord data;
+    data.data = batched_datas[iter];
+    data.lod = batched_lods[iter];
+    return data;
+  }
+};
+
+struct PredictStats {
+  int64_t total_samples;
+  int64_t total_iters;
+  double total_time;
 };
 
 void GetOneBatch(std::vector<PaddleTensor> *input_slots, DataRecord *data,
-                 int batch_size) {
-  auto one_batch = data->NextBatch();
+                 int batch_size, size_t iter = -1) {
+  auto one_batch =
+      iter == (size_t)-1 ? data->NextBatch() : data->GetBatch(iter);
   PaddleTensor input_tensor;
   input_tensor.name = "word";
   input_tensor.shape.assign({static_cast<int>(one_batch.data.size()), 1});
@@ -124,71 +142,133 @@ const int64_t lac_ref_data[] = {24, 25, 25, 25, 38, 30, 31, 14, 15, 44, 24, 25,
 
 void TestLACPrediction(const std::string &model_path,
                        const std::string &data_file, const int batch_size,
-                       const int repeat, bool test_all_data,
+                       const int repeat, bool test_all_data, int num_threads,
                        bool use_analysis = false) {
   NativeConfig config;
   config.model_dir = model_path;
   config.use_gpu = false;
   config.device = 0;
   config.specify_input_name = true;
-  std::vector<PaddleTensor> input_slots, outputs_slots;
+  AnalysisConfig cfg;
+  cfg.model_dir = model_path;
+  cfg.use_gpu = false;
+  cfg.device = 0;
+  cfg.specify_input_name = true;
+  cfg.enable_ir_optim = true;
+  std::vector<struct PredictStats> stats;
+  stats.resize(num_threads);
   DataRecord data(data_file, batch_size);
-  GetOneBatch(&input_slots, &data, batch_size);
-  std::unique_ptr<PaddlePredictor> predictor;
-  if (use_analysis) {
-    AnalysisConfig cfg;
-    cfg.model_dir = model_path;
-    cfg.use_gpu = false;
-    cfg.device = 0;
-    cfg.specify_input_name = true;
-    cfg.enable_ir_optim = true;
-    predictor =
-        CreatePaddlePredictor<AnalysisConfig, PaddleEngineKind::kAnalysis>(cfg);
-  } else {
-    predictor =
-        CreatePaddlePredictor<NativeConfig, PaddleEngineKind::kNative>(config);
-  }
-  for (int i = 0; i < FLAGS_burning; i++) {
-    predictor->Run(input_slots, &outputs_slots);
-  }
-  Timer timer;
-  if (test_all_data) {
-    double sum = 0;
-    LOG(INFO) << "Total number of samples: " << data.datasets.size();
-    for (int i = 0; i < repeat; i++) {
-      for (size_t bid = 0; bid < data.batched_datas.size(); ++bid) {
-        GetOneBatch(&input_slots, &data, batch_size);
-        timer.tic();
-        predictor->Run(input_slots, &outputs_slots);
-        sum += timer.toc();
-      }
-    }
-    PrintTime(batch_size, repeat, 1, 0, sum / repeat);
-    LOG(INFO) << "Average latency of each sample: "
-              << sum / repeat / data.datasets.size() << " ms";
-    return;
-  }
-  timer.tic();
-  for (int i = 0; i < repeat; i++) {
-    predictor->Run(input_slots, &outputs_slots);
-  }
-  PrintTime(batch_size, repeat, 1, 0, timer.toc() / repeat);
+  std::vector<std::thread> threads;
+  std::vector<std::shared_ptr<PaddlePredictor>> predictors;
+  std::shared_ptr<PaddlePredictor> predictor;
 
-  // check result
-  EXPECT_EQ(outputs_slots.size(), 1UL);
-  auto &out = outputs_slots[0];
-  size_t size = std::accumulate(out.shape.begin(), out.shape.end(), 1,
-                                [](int a, int b) { return a * b; });
-  size_t batch1_size = sizeof(lac_ref_data) / sizeof(int64_t);
-  PADDLE_ENFORCE_GT(size, 0);
-  EXPECT_GE(size, batch1_size);
-  int64_t *pdata = static_cast<int64_t *>(out.data.data());
-  for (size_t i = 0; i < batch1_size; ++i) {
-    EXPECT_EQ(pdata[i], lac_ref_data[i]);
+  for (int tid = 0; tid < num_threads; ++tid) {
+    std::vector<PaddleTensor> input_slots, outputs_slots;
+    predictors.emplace_back(
+        use_analysis
+            ? CreatePaddlePredictor<AnalysisConfig,
+                                    PaddleEngineKind::kAnalysis>(cfg)
+            : CreatePaddlePredictor<NativeConfig, PaddleEngineKind::kNative>(
+                  config));
   }
+
+  predictor = predictors[0];
+
+  for (int tid = 0; tid < num_threads; ++tid) {
+    threads.emplace_back([&, tid]() {
+      std::vector<PaddleTensor> input_slots, outputs_slots;
+      GetOneBatch(&input_slots, &data, batch_size, 0);
+      for (int i = 0; i < FLAGS_burning; i++) {
+        predictor->Run(input_slots, &outputs_slots);
+      }
+      Timer timer;
+      double sum = 0;
+      if (test_all_data) {
+        LOG(INFO) << "Total number of samples: " << data.datasets.size();
+        for (int i = 0; i < repeat; i++) {
+          for (size_t bid = 0; bid < data.batched_datas.size(); ++bid) {
+            GetOneBatch(&input_slots, &data, batch_size, bid);
+            timer.tic();
+            predictors[tid]->Run(input_slots, &outputs_slots);
+            sum += timer.toc();
+          }
+        }
+        PrintTime(batch_size, repeat, num_threads, tid, sum / repeat);
+        LOG(INFO) << "Average latency of each sample: "
+                  << sum / repeat / data.datasets.size() << " ms";
+
+        // save stat
+        PredictStats &stat = stats[tid];
+        stat.total_samples = repeat * data.batched_datas.size() * batch_size;
+        stat.total_time = sum;
+        stat.total_iters = repeat * data.batched_datas.size();
+        return;
+      }
+      timer.tic();
+      for (int i = 0; i < repeat; i++) {
+        predictors[tid]->Run(input_slots, &outputs_slots);
+      }
+      sum += timer.toc();
+      PrintTime(batch_size, repeat, num_threads, tid, sum / repeat);
+
+      // save stat
+      PredictStats &stat = stats[tid];
+      stat.total_samples = repeat * data.batched_datas.size() * batch_size;
+      stat.total_time = sum;
+      stat.total_iters = repeat * data.batched_datas.size();
+
+      // check result
+      EXPECT_EQ(outputs_slots.size(), 1UL);
+      auto &out = outputs_slots[0];
+      size_t size = std::accumulate(out.shape.begin(), out.shape.end(), 1,
+                                    [](int a, int b) { return a * b; });
+      size_t batch1_size = sizeof(lac_ref_data) / sizeof(int64_t);
+      PADDLE_ENFORCE_GT(size, 0);
+      EXPECT_GE(size, batch1_size);
+      int64_t *pdata = static_cast<int64_t *>(out.data.data());
+      for (size_t i = 0; i < batch1_size; ++i) {
+        EXPECT_EQ(pdata[i], lac_ref_data[i]);
+      }
+    });
+  }
+
+  for (int i = 0; i < num_threads; ++i) {
+    threads[i].join();
+  }
+
+  // collect statistic data
+  int64_t total_samples = std::accumulate(
+      stats.begin(), stats.end(), 0,
+      [](int64_t a, PredictStats &b) { return a + b.total_samples; });
+  int64_t total_iters = std::accumulate(
+      stats.begin(), stats.end(), 0,
+      [](int64_t a, PredictStats &b) { return a + b.total_iters; });
+  double total_time = std::accumulate(
+      stats.begin(), stats.end(), 0,
+      [](double a, PredictStats &b) { return a + b.total_time; });
+
+  LOG(INFO) << "==== Predict with all " << FLAGS_num_threads
+            << " threads finished ====";
+  LOG(INFO) << "Total samples: " << total_samples
+            << ", Total time(ms): " << total_time;
+  LOG(INFO) << "Total iterations: " << total_iters
+            << ", BatchSize: " << batch_size;
+  LOG(INFO) << "Total QPS: "
+            << total_samples * 1000 / (total_time / num_threads)
+            << ", Aver QPS per thread: " << total_samples * 1000 / total_time;
+  LOG(INFO) << "Average latency per iter (ms): " << total_time / total_iters;
+  LOG(INFO) << "Average latency per sample (ms): "
+            << total_time / total_samples;
 
   if (use_analysis) {
     // run once for comparion as reference
+    std::vector<PaddleTensor> input_slots, outputs_slots;
+    GetOneBatch(&input_slots, &data, batch_size, 0);
+    predictor->Run(input_slots, &outputs_slots);
+    auto &out = outputs_slots[0];
+    int64_t *pdata = static_cast<int64_t *>(out.data.data());
+    size_t size = std::accumulate(out.shape.begin(), out.shape.end(), 1,
+                                  [](int a, int b) { return a * b; });
     auto ref_predictor =
         CreatePaddlePredictor<NativeConfig, PaddleEngineKind::kNative>(config);
     std::vector<PaddleTensor> ref_outputs_slots;
@@ -231,13 +311,13 @@ void TestLACPrediction(const std::string &model_path,
 TEST(Analyzer_LAC, native) {
   LOG(INFO) << "LAC with native";
   TestLACPrediction(FLAGS_infer_model, FLAGS_infer_data, FLAGS_batch_size,
-                    FLAGS_repeat, FLAGS_test_all_data);
+                    FLAGS_repeat, FLAGS_test_all_data, FLAGS_num_threads);
 }
 
 TEST(Analyzer_LAC, analysis) {
   LOG(INFO) << "LAC with analysis";
   TestLACPrediction(FLAGS_infer_model, FLAGS_infer_data, FLAGS_batch_size,
-                    FLAGS_repeat, FLAGS_test_all_data, true);
+                    FLAGS_repeat, FLAGS_test_all_data, 1, true);
 }
 
 }  // namespace analysis
