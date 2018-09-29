@@ -264,19 +264,27 @@ class FusionGRUKernel : public framework::OpKernel<T> {
         tstart = 1;
         move_step();
       }
+      T* packed_wh_data = blas.GEMM_ALLOC(CblasBMatrix, 1, D2, D);
+      PADDLE_ENFORCE(packed_wh_data);
+      blas.GEMM_PACK(CblasBMatrix, CblasNoTrans, 1, D2, D, T(1.0), wh_data, D2,
+                     packed_wh_data);
+      T* packed_wh_state_data = blas.GEMM_ALLOC(CblasBMatrix, 1, D, D);
+      PADDLE_ENFORCE(packed_wh_state_data);
+      blas.GEMM_PACK(CblasBMatrix, CblasNoTrans, 1, D, D, T(1.0), wh_state_data,
+                     D, packed_wh_state_data);
       for (int step = tstart; step < seq_len; ++step) {
         // gemm prev * (Wu + Wr)
-        blas.GEMM(CblasNoTrans, CblasNoTrans, 1, D2, D, static_cast<T>(1),
-                  prev_hidden_data, D, wh_data, D2, static_cast<T>(1), xx_data,
-                  D3);
+        blas.GEMM_COMPUTE(CblasNoTrans, CblasPacked, 1, D2, D, prev_hidden_data,
+                          D, packed_wh_data, D2, static_cast<T>(1), xx_data,
+                          D3);
         act_gate(D2, xx_data, xx_data);
         // rt = rt*ht_1 inplace result
         blas.VMUL(D, prev_hidden_data, xx_data + D, hidden_out_data);
 
         // gemm rt * Ws
-        blas.GEMM(CblasNoTrans, CblasNoTrans, 1, D, D, static_cast<T>(1),
-                  hidden_out_data, D, wh_state_data, D, static_cast<T>(1),
-                  xx_data + D2, D3);
+        blas.GEMM_COMPUTE(CblasNoTrans, CblasPacked, 1, D, D, hidden_out_data,
+                          D, packed_wh_state_data, D, static_cast<T>(1),
+                          xx_data + D2, D3);
         act_state(D, xx_data + D2, xx_data + D2);
         // out = zt*ht~ + (1-zt)*ht_1
         cross(D, xx_data, xx_data + D2, prev_hidden_data, hidden_out_data);
@@ -284,6 +292,8 @@ class FusionGRUKernel : public framework::OpKernel<T> {
         prev_hidden_data = hidden_out_data;
         move_step();
       }
+      blas.GEMM_FREE(packed_wh_state_data);
+      blas.GEMM_FREE(packed_wh_data);
     }
   }
 
