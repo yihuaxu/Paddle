@@ -306,9 +306,9 @@ class ConvMKLDNNOpKernel : public paddle::framework::OpKernel<T> {
                        filter->format() != memory::format::format_undef,
                    "Wrong layout/format set for Filter tensor");
     PADDLE_ENFORCE(input->dims().size() == 4 || input->dims().size() == 5,
-                   "Input must be with 4 or 5dimensions, i.e. NCHW");
+                   "Input must be with 4 or 5dimensions, i.e. NCHW or NCDHW");
     PADDLE_ENFORCE(filter->dims().size() == 4 || filter->dims().size() == 5,
-                   "Filter must be with 4 or 5 dimensions, i.e. OIHW");
+                   "Filter must be with 4 or 5 dimensions, i.e. OIHW or OIDHW");
     if (bias) {
       PADDLE_ENFORCE(bias->layout() == DataLayout::kMKLDNN &&
                          bias->format() != memory::format::format_undef,
@@ -649,6 +649,7 @@ class ConvMKLDNNGradOpKernel : public paddle::framework::OpKernel<T> {
     std::vector<int> dilations = ctx.Attr<std::vector<int>>("dilations");
     int groups = ctx.Attr<int>("groups");
 
+    bool is_conv3d = strides.size() == 3U;
     const T* input_data = input->data<T>();
     const T* filter_data = filter->data<T>();
     const T* output_grad_data = output_grad->data<T>();
@@ -658,12 +659,39 @@ class ConvMKLDNNGradOpKernel : public paddle::framework::OpKernel<T> {
     std::vector<int> src_tz = paddle::framework::vectorize2int(input->dims());
     std::vector<int> weights_tz =
         paddle::framework::vectorize2int(filter->dims());
+    int g = std::max(groups, 1);
+    if (g > 1) {
+      if (is_conv3d) {
+        int o = weights_tz[0];
+        int i = weights_tz[1];
+        int d = weights_tz[2];
+        int h = weights_tz[3];
+        int w = weights_tz[4];
+        weights_tz.resize(6);
+        weights_tz[0] = g;
+        weights_tz[1] = o / g;
+        weights_tz[2] = i;
+        weights_tz[3] = d;
+        weights_tz[4] = h;
+        weights_tz[5] = w;
+      } else {
+        int o = weights_tz[0];
+        int i = weights_tz[1];
+        int h = weights_tz[2];
+        int w = weights_tz[3];
+        weights_tz.resize(5);
+        weights_tz[0] = g;
+        weights_tz[1] = o / g;
+        weights_tz[2] = i;
+        weights_tz[3] = h;
+        weights_tz[4] = w;
+      }
+    }
     std::vector<int> dst_tz = paddle::framework::vectorize2int(output->dims());
 
-    bool is_conv3d = strides.size() == 3U;
     auto src_format = input->format();
     mkldnn::memory::format weight_format =
-        (groups == 1) ? filter->format() : mkldnn::memory::format::goihw;
+        (g == 1) ? filter->format() : mkldnn::memory::format::goihw;
 
     if (is_conv3d) {
       if (src_format == mkldnn::memory::format::nchw) {
@@ -673,7 +701,7 @@ class ConvMKLDNNGradOpKernel : public paddle::framework::OpKernel<T> {
       }
 
       weight_format =
-          (groups == 1) ? filter->format() : mkldnn::memory::format::goidhw;
+          (g == 1) ? filter->format() : mkldnn::memory::format::goidhw;
       if (weight_format == mkldnn::memory::format::nchw) {
         weight_format = mkldnn::memory::format::oidhw;
       } else if (weight_format == mkldnn::memory::format::nhwc) {
