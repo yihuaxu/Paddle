@@ -353,6 +353,15 @@ class ELUOpMaker : public framework::OpProtoAndCheckerMaker {
     AddInput("X", "Input of ELU operator");
     AddOutput("Out", "Output of ELU operator");
     AddAttr<float>("alpha", "The alpha value of ELU").SetDefault(1.0f);
+#ifdef PADDLE_WITH_MKLDNN
+    AddAttr<bool>("use_mkldnn",
+                  "(bool, default false) Only used in mkldnn kernel")
+        .SetDefault(false);
+    AddAttr<bool>("is_test",
+                  "(bool, default false) Set to true for inference only, false "
+                  "for training. Some layers may run faster when this is true.")
+        .SetDefault(false);
+#endif
     AddComment(R"DOC(
 ELU Activation Operator.
 
