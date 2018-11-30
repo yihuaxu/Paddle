@@ -100,9 +100,6 @@ void eltwise_forward(const framework::ExecutionContext &ctx,
   const T *x_data = x->data<T>();
   T *y_data = y->mutable_data<T>(ctx.GetPlace());
 
-  PADDLE_ENFORCE(x->dims().size() == 2 || x->dims().size() == 4,
-                 "Input dim must be with 2 or 4");
-
   std::vector<int> src_tz = framework::vectorize2int(x->dims());
 
   auto src_format =
@@ -339,6 +336,10 @@ using SqrtMKLDNNGradFunctor =
 template <typename T>
 using AbsMKLDNNGradFunctor =
     MKLDNNActivationGradFunc<T, mkldnn::algorithm::eltwise_abs>;
+
+template <typename T>
+using EluMKLDNNFunctor =
+    MKLDNNActivationFunc<T, mkldnn::algorithm::eltwise_elu>;
 }  // namespace operators
 }  // namespace paddle
 
@@ -358,3 +359,5 @@ namespace ops = paddle::operators;
   __macro(abs, AbsMKLDNNFunctor, AbsMKLDNNGradFunctor);
 
 FOR_EACH_MKLDNN_KERNEL_FUNCTOR(REGISTER_ACTIVATION_MKLDNN_KERNEL);
+REGISTER_OP_KERNEL(elu, MKLDNN, ::paddle::platform::CPUPlace,
+                   ops::MKLDNNActivationKernel<ops::EluMKLDNNFunctor<float>>);

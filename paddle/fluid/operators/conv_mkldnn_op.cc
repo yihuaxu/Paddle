@@ -378,29 +378,18 @@ class ConvMKLDNNOpKernel : public paddle::framework::OpKernel<T> {
     std::vector<primitive> pipeline;
 
     auto src_format = input->format();
-    mkldnn::memory::format weight_format =
+    mkldnn::memory::format weights_format =
         (g == 1) ? filter->format() : mkldnn::memory::format::goihw;
 
     if (is_conv3d) {
-      if (src_format == mkldnn::memory::format::nchw) {
-        src_format = mkldnn::memory::format::ncdhw;
-      } else if (src_format == mkldnn::memory::format::nhwc) {
-        src_format = mkldnn::memory::format::ndhwc;
-      }
-
-      weight_format =
+      weights_format =
           (g == 1) ? filter->format() : mkldnn::memory::format::goidhw;
-      if (weight_format == mkldnn::memory::format::nchw) {
-        weight_format = mkldnn::memory::format::oidhw;
-      } else if (weight_format == mkldnn::memory::format::nhwc) {
-        weight_format = mkldnn::memory::format::dhwio;
-      }
     }
 
     auto user_src_md = platform::MKLDNNMemDesc(
         {src_tz}, platform::MKLDNNGetDataType<T>(), src_format);
     auto user_weights_md = platform::MKLDNNMemDesc(
-        {weights_tz}, platform::MKLDNNGetDataType<T>(), weight_format);
+        {weights_tz}, platform::MKLDNNGetDataType<T>(), weights_format);
 
     /* create memory descriptor for convolution without specified format
      * ('any') which lets a primitive (convolution in this case) choose
@@ -410,19 +399,20 @@ class ConvMKLDNNOpKernel : public paddle::framework::OpKernel<T> {
     auto chosen_memory_format =
         platform::data_format_to_memory_format(data_format);
 
+    weights_format =
+        (g == 1) ? chosen_memory_format : mkldnn::memory::format::goihw;
+
     if (is_conv3d) {
-      if (chosen_memory_format == mkldnn::memory::format::nchw) {
-        chosen_memory_format = mkldnn::memory::format::ncdhw;
-      } else if (chosen_memory_format == mkldnn::memory::format::nhwc) {
-        chosen_memory_format = mkldnn::memory::format::ndhwc;
-      }
+      chosen_memory_format =
+          platform::MKLDNNFormatForSize(src_tz.size(), chosen_memory_format);
+      weights_format =
+          (g == 1) ? chosen_memory_format : mkldnn::memory::format::goidhw;
     }
 
     auto src_md = platform::MKLDNNMemDesc(
         src_tz, platform::MKLDNNGetDataType<T>(), chosen_memory_format);
     auto weights_md = platform::MKLDNNMemDesc(
-        weights_tz, platform::MKLDNNGetDataType<T>(),
-        is_conv3d ? weight_format : chosen_memory_format);
+        weights_tz, platform::MKLDNNGetDataType<T>(), weights_format);
     std::vector<int> bias_tz;  // TODO(mgallus): avoid empty vector creation.
                                // Currently used whenever bias is != nullptr.
     auto dst_md = platform::MKLDNNMemDesc(
@@ -690,23 +680,12 @@ class ConvMKLDNNGradOpKernel : public paddle::framework::OpKernel<T> {
     std::vector<int> dst_tz = paddle::framework::vectorize2int(output->dims());
 
     auto src_format = input->format();
-    mkldnn::memory::format weight_format =
+    mkldnn::memory::format weights_format =
         (g == 1) ? filter->format() : mkldnn::memory::format::goihw;
 
     if (is_conv3d) {
-      if (src_format == mkldnn::memory::format::nchw) {
-        src_format = mkldnn::memory::format::ncdhw;
-      } else if (src_format == mkldnn::memory::format::nhwc) {
-        src_format = mkldnn::memory::format::ndhwc;
-      }
-
-      weight_format =
+      weights_format =
           (g == 1) ? filter->format() : mkldnn::memory::format::goidhw;
-      if (weight_format == mkldnn::memory::format::nchw) {
-        weight_format = mkldnn::memory::format::oidhw;
-      } else if (weight_format == mkldnn::memory::format::nhwc) {
-        weight_format = mkldnn::memory::format::dhwio;
-      }
     }
 
     // Get an unique name from "argument" name of "Output" variable
@@ -723,7 +702,7 @@ class ConvMKLDNNGradOpKernel : public paddle::framework::OpKernel<T> {
     auto user_src_md = platform::MKLDNNMemDesc(
         {src_tz}, platform::MKLDNNGetDataType<T>(), src_format);
     auto user_weights_md = platform::MKLDNNMemDesc(
-        {weights_tz}, platform::MKLDNNGetDataType<T>(), weight_format);
+        {weights_tz}, platform::MKLDNNGetDataType<T>(), weights_format);
     auto user_diff_dst_md = platform::MKLDNNMemDesc(
         {dst_tz}, platform::MKLDNNGetDataType<T>(), output_grad->format());
 
@@ -735,12 +714,14 @@ class ConvMKLDNNGradOpKernel : public paddle::framework::OpKernel<T> {
     auto chosen_memory_format =
         platform::data_format_to_memory_format(data_format);
 
+    weights_format =
+        (g == 1) ? chosen_memory_format : mkldnn::memory::format::goihw;
+
     if (is_conv3d) {
-      if (chosen_memory_format == mkldnn::memory::format::nchw) {
-        chosen_memory_format = mkldnn::memory::format::ncdhw;
-      } else if (chosen_memory_format == mkldnn::memory::format::nhwc) {
-        chosen_memory_format = mkldnn::memory::format::ndhwc;
-      }
+      chosen_memory_format =
+          platform::MKLDNNFormatForSize(src_tz.size(), chosen_memory_format);
+      weights_format =
+          (g == 1) ? chosen_memory_format : mkldnn::memory::format::goidhw;
     }
 
     auto src_md = platform::MKLDNNMemDesc(
@@ -748,11 +729,9 @@ class ConvMKLDNNGradOpKernel : public paddle::framework::OpKernel<T> {
     auto diff_src_md = platform::MKLDNNMemDesc(
         src_tz, platform::MKLDNNGetDataType<T>(), chosen_memory_format);
     auto weights_md = platform::MKLDNNMemDesc(
-        weights_tz, platform::MKLDNNGetDataType<T>(),
-        is_conv3d ? weight_format : chosen_memory_format);
+        weights_tz, platform::MKLDNNGetDataType<T>(), weights_format);
     auto diff_weights_md = platform::MKLDNNMemDesc(
-        weights_tz, platform::MKLDNNGetDataType<T>(),
-        is_conv3d ? weight_format : chosen_memory_format);
+        weights_tz, platform::MKLDNNGetDataType<T>(), weights_format);
     auto diff_dst_md = platform::MKLDNNMemDesc(
         dst_tz, platform::MKLDNNGetDataType<T>(), chosen_memory_format);
 

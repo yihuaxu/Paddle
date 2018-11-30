@@ -29,6 +29,7 @@ namespace ir {
 class ConvReLUFusePass : public FusePassBase {
  public:
   virtual ~ConvReLUFusePass() {}
+  virtual bool is_conv3d() const { return false; }
 
  protected:
   std::unique_ptr<ir::Graph> ApplyImpl(

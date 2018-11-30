@@ -11,27 +11,23 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 #pragma once
-#include <string>
-#include "paddle/fluid/framework/ir/fuse_pass_base.h"
-#include "paddle/fluid/framework/ir/graph.h"
-#include "paddle/fluid/framework/ir/graph_pattern_detector.h"
-#include "paddle/fluid/framework/ir/pass.h"
+
+#include "paddle/fluid/framework/ir/conv_relu_mkldnn_fuse_pass.h"
+
 namespace paddle {
 namespace framework {
 namespace ir {
-/*
-* Fuse the Conv and Elementwise_add to a ConvBiasOp.
-*/
-class ConvBiasFusePass : public FusePassBase {
- public:
-  virtual ~ConvBiasFusePass() {}
-  virtual bool is_conv3d() const { return false; }
 
- protected:
-  std::unique_ptr<ir::Graph> ApplyImpl(std::unique_ptr<ir::Graph> graph) const;
-  const std::string name_scope_{"conv_bias_mkldnn_fuse"};
+/*
+ * Fuse the CONV3D and ReLU to a Conv3DReLUOp.
+ */
+class Conv3DReLUFusePass : public ConvReLUFusePass {
+ public:
+  bool is_conv3d() const override { return true; }
 };
+
 }  // namespace ir
 }  // namespace framework
 }  // namespace paddle

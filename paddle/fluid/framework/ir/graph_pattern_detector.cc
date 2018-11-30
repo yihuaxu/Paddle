@@ -754,26 +754,58 @@ PDNode *patterns::ConvBN::operator()(paddle::framework::ir::PDNode *conv_input,
 }
 
 PDNode *patterns::ConvReLU::operator()(
-    paddle::framework::ir::PDNode *conv_input) {
+    paddle::framework::ir::PDNode *conv_input, bool is_conv3d) {
   // Create Operators
-  conv_input->assert_is_op_input("conv2d", "Input");
-  auto *conv_op = pattern->NewNode(conv_repr())->assert_is_op("conv2d");
+  conv_input->assert_is_op_input(is_conv3d ? "conv3d" : "conv2d", "Input");
+  auto *conv_op = pattern->NewNode(conv_repr())
+                      ->assert_is_op(is_conv3d ? "conv3d" : "conv2d");
   auto *relu_op = pattern->NewNode(relu_repr())->assert_is_op("relu");
   // Create variables
   // Filter
-  auto *conv_weight_var = pattern->NewNode(conv_weight_repr())
-                              ->AsInput()
-                              ->assert_is_persistable_var()
-                              ->assert_is_op_input("conv2d", "Filter");
+  auto *conv_weight_var =
+      pattern->NewNode(conv_weight_repr())
+          ->AsInput()
+          ->assert_is_persistable_var()
+          ->assert_is_op_input(is_conv3d ? "conv3d" : "conv2d", "Filter");
   // intermediate variable, will be removed in the IR after fuse.
-  auto *conv_out_var = pattern->NewNode(conv_out_repr())
-                           ->AsIntermediate()
-                           ->assert_is_only_output_of_op("conv2d")
-                           ->assert_is_op_input("relu");
+  auto *conv_out_var =
+      pattern->NewNode(conv_out_repr())
+          ->AsIntermediate()
+          ->assert_is_only_output_of_op(is_conv3d ? "conv3d" : "conv2d")
+          ->assert_is_op_input("relu");
   // output
   auto *relu_out_var = pattern->NewNode(relu_out_repr())
                            ->AsOutput()
                            ->assert_is_op_output("relu");
+
+  conv_op->LinksFrom({conv_input, conv_weight_var}).LinksTo({conv_out_var});
+  relu_op->LinksFrom({conv_out_var}).LinksTo({relu_out_var});
+  return relu_out_var;
+}
+
+PDNode *patterns::ConvELU::operator()(paddle::framework::ir::PDNode *conv_input,
+                                      bool is_conv3d) {
+  // Create Operators
+  conv_input->assert_is_op_input(is_conv3d ? "conv3d" : "conv2d", "Input");
+  auto *conv_op = pattern->NewNode(conv_repr())
+                      ->assert_is_op(is_conv3d ? "conv3d" : "conv2d");
+  auto *relu_op = pattern->NewNode(elu_repr())->assert_is_op("elu");
+  // Create variables
+  // Filter
+  auto *conv_weight_var =
+      pattern->NewNode(conv_weight_repr())
+          ->AsInput()
+          ->assert_is_persistable_var()
+          ->assert_is_op_input(is_conv3d ? "conv3d" : "conv2d", "Filter");
+  // intermediate variable, will be removed in the IR after fuse.
+  auto *conv_out_var =
+      pattern->NewNode(conv_out_repr())
+          ->AsIntermediate()
+          ->assert_is_only_output_of_op(is_conv3d ? "conv3d" : "conv2d")
+          ->assert_is_op_input("elu");
+  // output
+  auto *relu_out_var =
+      pattern->NewNode(elu_out_repr())->AsOutput()->assert_is_op_output("elu");
 
   conv_op->LinksFrom({conv_input, conv_weight_var}).LinksTo({conv_out_var});
   relu_op->LinksFrom({conv_out_var}).LinksTo({relu_out_var});
@@ -1031,23 +1063,26 @@ PDNode *patterns::ElewiseAddActInplaceGrad::operator()(
 }
 
 PDNode *patterns::ConvBias::operator()(
-    paddle::framework::ir::PDNode *conv_input) {
+    paddle::framework::ir::PDNode *conv_input, bool is_conv3d) {
   // Create Operators
-  conv_input->assert_is_op_input("conv2d", "Input");
-  auto *conv_op = pattern->NewNode(conv_repr())->assert_is_op("conv2d");
+  conv_input->assert_is_op_input(is_conv3d ? "conv3d" : "conv2d", "Input");
+  auto *conv_op = pattern->NewNode(conv_repr())
+                      ->assert_is_op(is_conv3d ? "conv3d" : "conv2d");
   auto *eltiwse_op =
       pattern->NewNode(eltwise_repr())->assert_is_op("elementwise_add");
   // Create variables
   // Filter
-  auto *conv_weight_var = pattern->NewNode(conv_weight_repr())
-                              ->AsInput()
-                              ->assert_is_persistable_var()
-                              ->assert_is_op_input("conv2d", "Filter");
+  auto *conv_weight_var =
+      pattern->NewNode(conv_weight_repr())
+          ->AsInput()
+          ->assert_is_persistable_var()
+          ->assert_is_op_input(is_conv3d ? "conv3d" : "conv2d", "Filter");
   // intermediate variable, will be removed in the IR after fuse.
-  auto *conv_out_var = pattern->NewNode(conv_out_repr())
-                           ->AsIntermediate()
-                           ->assert_is_only_output_of_op("conv2d")
-                           ->assert_is_op_input("elementwise_add");
+  auto *conv_out_var =
+      pattern->NewNode(conv_out_repr())
+          ->AsIntermediate()
+          ->assert_is_only_output_of_op(is_conv3d ? "conv3d" : "conv2d")
+          ->assert_is_op_input("elementwise_add");
   // Bias stored in elementwise_add
   auto *eltwise_bias_var = pattern->NewNode(eltwise_bias_repr())
                                ->AsInput()
@@ -1063,20 +1098,24 @@ PDNode *patterns::ConvBias::operator()(
   return eltwise_out_var;
 }
 
-PDNode *patterns::Conv::operator()() {
-  auto conv_op = pattern->NewNode(conv_op_repr())->assert_is_op("conv2d");
+PDNode *patterns::Conv::operator()(bool is_conv3d) {
+  auto conv_op = pattern->NewNode(conv_op_repr())
+                     ->assert_is_op(is_conv3d ? "conv3d" : "conv2d");
 
-  auto input_var = pattern->NewNode(conv_input_repr())
-                       ->AsInput()
-                       ->assert_is_op_input("conv2d", "Input");
+  auto input_var =
+      pattern->NewNode(conv_input_repr())
+          ->AsInput()
+          ->assert_is_op_input(is_conv3d ? "conv3d" : "conv2d", "Input");
 
-  auto filter_var = pattern->NewNode(conv_filter_repr())
-                        ->AsInput()
-                        ->assert_is_op_input("conv2d", "Filter");
+  auto filter_var =
+      pattern->NewNode(conv_filter_repr())
+          ->AsInput()
+          ->assert_is_op_input(is_conv3d ? "conv3d" : "conv2d", "Filter");
 
-  auto output_var = pattern->NewNode(conv_output_repr())
-                        ->AsOutput()
-                        ->assert_is_op_output("conv2d", "Output");
+  auto output_var =
+      pattern->NewNode(conv_output_repr())
+          ->AsOutput()
+          ->assert_is_op_output(is_conv3d ? "conv3d" : "conv2d", "Output");
 
   conv_op->LinksFrom({input_var, filter_var});
   conv_op->LinksTo({output_var});

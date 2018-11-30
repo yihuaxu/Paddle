@@ -432,7 +432,7 @@ struct ConvReLU : public PatternBase {
   ConvReLU(PDPattern* pattern, const std::string& name_scope)
       : PatternBase(pattern, name_scope, "conv_relu") {}
 
-  PDNode* operator()(PDNode* conv_input);
+  PDNode* operator()(PDNode* conv_input, bool is_conv3d = false);
 
   // declare operator node's name
   PATTERN_DECL_NODE(conv);
@@ -441,6 +441,27 @@ struct ConvReLU : public PatternBase {
   PATTERN_DECL_NODE(conv_weight);
   PATTERN_DECL_NODE(conv_out);
   PATTERN_DECL_NODE(relu_out);
+};
+
+// CONV with ELU
+// op: conv + elu
+// named nodes:
+// conv_input, conv_weight,
+// conv_out, conv,
+// elu_out, elu
+struct ConvELU : public PatternBase {
+  ConvELU(PDPattern* pattern, const std::string& name_scope)
+      : PatternBase(pattern, name_scope, "conv_elu") {}
+
+  PDNode* operator()(PDNode* conv_input, bool is_conv3d = false);
+
+  // declare operator node's name
+  PATTERN_DECL_NODE(conv);
+  PATTERN_DECL_NODE(elu);
+  // declare variable node's name
+  PATTERN_DECL_NODE(conv_weight);
+  PATTERN_DECL_NODE(conv_out);
+  PATTERN_DECL_NODE(elu_out);
 };
 
 // SEQCONV with Elementwise_Add ReLU
@@ -623,7 +644,7 @@ struct ElewiseAddActInplaceGrad : public PatternBase {
 struct ConvBias : public PatternBase {
   ConvBias(PDPattern* pattern, const std::string& name_scope)
       : PatternBase(pattern, name_scope, "conv_bias") {}
-  PDNode* operator()(PDNode* conv_input);
+  PDNode* operator()(PDNode* conv_input, bool is_conv3d = false);
   // declare operator node's name
   PATTERN_DECL_NODE(conv);
   PATTERN_DECL_NODE(eltwise);
@@ -647,7 +668,7 @@ struct Conv : public PatternBase {
   Conv(PDPattern* pattern, const std::string& name_scope)
       : PatternBase(pattern, name_scope, "convolution") {}
 
-  PDNode* operator()();
+  PDNode* operator()(bool is_conv3d = false);
 
   PATTERN_DECL_NODE(conv_op);
   PATTERN_DECL_NODE(conv_input);
