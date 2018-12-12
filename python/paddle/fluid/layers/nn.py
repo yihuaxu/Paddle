@@ -8408,7 +8408,7 @@ def merge_selected_rows(x, name=None):
 
 
 @templatedoc()
-def mul(x, y, x_num_col_dims=1, y_num_col_dims=1, name=None):
+def mul(x, y, x_num_col_dims=1, y_num_col_dims=1, use_mkldnn=False, name=None):
     """
     ${comment}
 
@@ -8437,7 +8437,8 @@ def mul(x, y, x_num_col_dims=1, y_num_col_dims=1, name=None):
                 "Y": y},
         attrs={
             "x_num_col_dims": x_num_col_dims,
-            "y_num_col_dims": y_num_col_dims
+            "y_num_col_dims": y_num_col_dims,
+            'use_mkldnn': use_mkldnn
         },
         outputs={"Out": out})
     return out
