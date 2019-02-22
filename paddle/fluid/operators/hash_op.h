@@ -42,12 +42,19 @@ class HashKerel : public framework::OpKernel<T> {
     auto seq_length = in_dims[0];
     auto last_dim = in_dims[in_dims.size() - 1];
     auto* input = in_t->data<T>();
+#pragma omp simd
     for (int idx = 0; idx < seq_length; ++idx) {
       for (int ihash = 0; ihash != num_hash; ++ihash) {
         output[idx * num_hash + ihash] =
-            XXH64(input, sizeof(int) * last_dim, ihash) % mod_by;
+            XXH64(input, sizeof(int) * last_dim, ihash);
       }
       input += last_dim;
+    }
+#pragma omp simd
+    for (int idx = 0; idx < seq_length; ++idx) {
+      for (int ihash = 0; ihash != num_hash; ++ihash) {
+        output[idx * num_hash + ihash] %= mod_by;
+      }
     }
   }
 };

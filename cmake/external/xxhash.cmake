@@ -71,3 +71,8 @@ add_library(xxhash STATIC IMPORTED GLOBAL)
 set_property(TARGET xxhash PROPERTY IMPORTED_LOCATION ${XXHASH_LIBRARIES})
 include_directories(${XXHASH_INCLUDE_DIR})
 add_dependencies(xxhash extern_xxhash)
+
+IF(WITH_XXHASH_INLINE)
+  FILE(COPY ${XXHASH_SOURCE_DIR}/src/extern_xxhash/xxhash.c DESTINATION ${XXHASH_INCLUDE_DIR})
+  ADD_DEFINITIONS(-DXXH_INLINE_ALL)
+ENDIF()
