@@ -16,9 +16,13 @@ limitations under the License. */
 #include <algorithm>
 #include <string>
 #include <vector>
+#include "paddle/fluid/framework/eigen.h"
+#include "paddle/fluid/framework/lod_tensor_array.h"
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/operators/jit/kernels.h"
 #include "paddle/fluid/operators/math/blas.h"
+#include "paddle/fluid/operators/math/math_function.h"
+#include "paddle/fluid/operators/math/selected_rows_functor.h"
 
 namespace paddle {
 namespace operators {
@@ -26,6 +30,10 @@ using Tensor = framework::Tensor;
 using LoDTensor = framework::LoDTensor;
 using SelectedRows = framework::SelectedRows;
 using DDim = framework::DDim;
+// using SelectedRows = framework::SelectedRows;
+template <typename T, int MajorType = Eigen::RowMajor,
+          typename IndexType = Eigen::DenseIndex>
+using EigenVector = framework::EigenVector<T, MajorType, IndexType>;
 
 template <typename T>
 struct EmbeddingVSumFunctor {
@@ -119,18 +127,74 @@ class FusedEnumHashEmdPoolKernel : public framework::OpKernel<T> {
       }
     }
 
-    //
+    // seq_emd_pool
+    std::vector<LoDTensor> seq_pool_out;
     EmbeddingVSumFunctor<T> functor;
-    std::vector<std::string> outputs = {"Out1", "Out2", "Out3"};
-    for (int idx = 0; idx < outputs.size(); idx++) {
-      const LoDTensor *table_var = context.Input<LoDTensor>("W1");
-      LoDTensor *output_t = context.Output<LoDTensor>(outputs[idx]);
-      functor(context, table_var, &hash_out[idx], output_t);
+    const LoDTensor *table1_var = context.Input<LoDTensor>("W1");
+    auto table1_tz = paddle::framework::vectorize2int(table1_var->dims());
+    for (int idx = 0; idx < num_hash.size(); idx++) {
+      LoDTensor lod_tensor;
+      lod_tensor.set_lod(in_lod);
+      lod_tensor.Resize({static_cast<int>(lod0.size() - 1),
+                         num_hash[idx] * table1_tz.back()});
+      functor(context, table1_var, &hash_out[idx], &lod_tensor);
+      seq_pool_out.push_back(lod_tensor);
     }
 
-    const LoDTensor *table_var = context.Input<LoDTensor>("W0");
-    LoDTensor *output_t = context.Output<LoDTensor>("Out0");
-    functor(context, table_var, in, output_t);
+    {
+      const LoDTensor *table0_var = context.Input<LoDTensor>("W0");
+      auto table0_tz = paddle::framework::vectorize2int(table0_var->dims());
+
+      LoDTensor lod_tensor;
+      lod_tensor.set_lod(in_lod);
+      lod_tensor.Resize({static_cast<int>(lod0.size() - 1), table0_tz.back()});
+      functor(context, table0_var, in, &lod_tensor);
+      seq_pool_out.push_back(lod_tensor);
+    }
+
+    // sum
+    bool in_place = false;
+    size_t in_num = seq_pool_out.size();
+
+    auto *out = context.Output<LoDTensor>("Out");
+    if (!in_place) {
+      out->mutable_data<T>(context.GetPlace());
+    }
+    auto result = EigenVector<T>::Flatten(*out);
+    auto &place =
+        *context.template device_context<DeviceContext>().eigen_device();
+    int start = in_place ? 1 : 0;
+    if (!in_place) {
+      if (in_num >= 2) {
+        auto &in_0 = seq_pool_out[0];
+        auto &in_1 = seq_pool_out[1];
+        if (in_0.numel() && in_1.numel()) {
+          auto in_0_e = EigenVector<T>::Flatten(in_0);
+          auto in_1_e = EigenVector<T>::Flatten(in_1);
+          result.device(place) = in_0_e + in_1_e;
+          start = 2;
+        }
+      }
+      if (start != 2) {
+        math::SetConstant<platform::CPUDeviceContext, T> constant_functor;
+        constant_functor(context.template device_context<DeviceContext>(), out,
+                         static_cast<T>(0));
+      }
+    }
+
+    // If in_place, just skip the first tensor
+    for (size_t i = start; i < in_num; i++) {
+      auto &in_t = seq_pool_out[i];
+      if (in_t.numel() == 0) {
+        continue;
+      }
+      auto in = EigenVector<T>::Flatten(in_t);
+      result.device(place) = result + in;
+    }
+
+    // Clear resource
+    hash_out.clear();
+    seq_pool_out.clear();
   }
 };
 
