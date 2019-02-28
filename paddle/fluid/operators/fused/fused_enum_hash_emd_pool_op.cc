@@ -24,8 +24,11 @@ class FusedEnumHashEmdPoolOp : public framework::OperatorWithKernel {
 
   void InferShape(framework::InferShapeContext* ctx) const override {
     PADDLE_ENFORCE(
-        ctx->HasInput("X"),
-        "Input(X) of FusedEnumHashEmdPool operator should not be null.");
+        ctx->HasInput("X0"),
+        "Input(X0) of FusedEnumHashEmdPool operator should not be null.");
+    PADDLE_ENFORCE(
+        ctx->HasInput("X1"),
+        "Input(X1) of FusedEnumHashEmdPool operator should not be null.");
     PADDLE_ENFORCE(
         ctx->HasInput("W0"),
         "Input(W1) of FusedEnumHashEmdPool operator should not be null.");
@@ -36,15 +39,23 @@ class FusedEnumHashEmdPoolOp : public framework::OperatorWithKernel {
         ctx->HasOutput("Out"),
         "Output(Out1) of FusedEnumHashEmdPool operator should not be null.");
 
-    const auto x_dims = ctx->GetInputDim("X");
+    const auto x0_dims = ctx->GetInputDim("X0");
     PADDLE_ENFORCE_EQ(
-        x_dims.size(), 2,
+        x0_dims.size(), 2,
         "Input(X) of FusedEnumHashEmdPool operator's rank should be 2.");
-    PADDLE_ENFORCE_EQ(x_dims[1], 1,
-                      "Input(X) of FusedEnumHashEmdPool operator's 2nd "
+    PADDLE_ENFORCE_EQ(x0_dims[1], 1,
+                      "Input(X0) of FusedEnumHashEmdPool operator's 2nd "
                       "dimension should be 1.");
 
-    std::string input_name = "X";
+    const auto x1_dims = ctx->GetInputDim("X1");
+    PADDLE_ENFORCE_EQ(
+        x1_dims.size(), 2,
+        "Input(X) of FusedEnumHashEmdPool operator's rank should be 2.");
+    PADDLE_ENFORCE_EQ(x1_dims[1], 1,
+                      "Input(X1) of FusedEnumHashEmdPool operator's 2nd "
+                      "dimension should be 1.");
+
+    std::string input_name = "X0";
     std::string output_name = "Out";
 
     auto table0_dims = ctx->GetInputDim("W0");
@@ -85,7 +96,7 @@ class FusedEnumHashEmdPoolOp : public framework::OperatorWithKernel {
       // should be [-1, 1] -> [-1, embedding_size]
       ctx->SetOutputDim(output_name, framework::make_ddim({-1, last_dim}));
     }
-    ctx->ShareLoD("X", /*->*/ "Out");
+    ctx->ShareLoD("X0", /*->*/ "Out");
   }
 
  protected:
@@ -99,7 +110,10 @@ class FusedEnumHashEmdPoolOp : public framework::OperatorWithKernel {
 class FusedEnumHashEmdPoolOpMaker : public framework::OpProtoAndCheckerMaker {
  public:
   void Make() override {
-    AddInput("X",
+    AddInput("X0",
+             "(2-D LoDTensor with the 2nd dimension equal to 1) "
+             "Input LoDTensor of SequenceEnumerate operator.");
+    AddInput("X1",
              "(2-D LoDTensor with the 2nd dimension equal to 1) "
              "Input LoDTensor of SequenceEnumerate operator.");
     AddInput("W0",
