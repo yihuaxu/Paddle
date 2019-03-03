@@ -21,57 +21,78 @@ limitations under the License. */
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/operators/jit/kernels.h"
 #include "paddle/fluid/operators/math/blas.h"
-#include "paddle/fluid/operators/math/math_function.h"
-#include "paddle/fluid/operators/math/selected_rows_functor.h"
 
 namespace paddle {
 namespace operators {
 using Tensor = framework::Tensor;
 using LoDTensor = framework::LoDTensor;
-using SelectedRows = framework::SelectedRows;
 using DDim = framework::DDim;
-template <typename T, int MajorType = Eigen::RowMajor,
-          typename IndexType = Eigen::DenseIndex>
-using EigenVector = framework::EigenVector<T, MajorType, IndexType>;
-
-template <typename T>
-struct EmbeddingVSumFunctor {
-  void operator()(const framework::ExecutionContext &context,
-                  const LoDTensor *table_t, const LoDTensor *ids_t,
-                  LoDTensor *output_t) {
-    auto *table = table_t->data<T>();
-    int64_t table_height = table_t->dims()[0];
-    int64_t table_width = table_t->dims()[1];
-    int64_t out_width = output_t->dims()[1];
-    const int64_t *ids = ids_t->data<int64_t>();
-    auto ids_lod = ids_t->lod()[0];
-    int64_t idx_width = ids_t->numel() / ids_lod.back();
-    auto *output = output_t->mutable_data<T>(context.GetPlace());
-
-    PADDLE_ENFORCE_LE(table_width * idx_width, out_width);
-    PADDLE_ENFORCE_GT(ids_lod.size(), 1UL);
-
-    jit::emb_seq_pool_attr_t attr(table_height, table_width, 0, idx_width,
-                                  out_width, jit::SeqPoolType::kSum);
-    for (size_t i = 0; i != ids_lod.size() - 1; ++i) {
-      attr.index_height = ids_lod[i + 1] - ids_lod[i];
-      auto emb_seqpool = jit::Get<jit::kEmbSeqPool, jit::EmbSeqPoolTuples<T>,
-                                  platform::CPUPlace>(attr);
-      emb_seqpool(table, ids + ids_lod[i] * idx_width, output + i * out_width,
-                  &attr);
-    }
-  }
-};
 
 template <typename DeviceContext, typename T>
 class FusedEnumHashEmdPoolKernel : public framework::OpKernel<T> {
  public:
-  void Compute(const framework::ExecutionContext &context) const override {
-    for (auto input_name : input_names) {
-      auto *in = context.Input<LoDTensor>(input_name);
-      auto win_size = context.Attr<std::vector<int>>("win_size");
-      int pad_value = context.Attr<int>("pad_value");
+  inline void table_compute(const T *x, T *y, T *z, int n) const {
+    const size_t block = YMM_FLOAT_BLOCK;
+    const size_t num_ = n;
+    const size_t rest_ = num_ % block;
+    const size_t end_ = num_ - rest_;
 
+    __m256 tmp;
+    size_t j;
+    if (rest_ != 0) {
+      j = num_ - block;
+      tmp = _mm256_loadu_ps((const float *)y + j);
+    }
+    for (j = 0; j < end_; j += block) {
+      _mm256_storeu_ps(reinterpret_cast<float *>(z) + j,
+                       _mm256_add_ps(_mm256_loadu_ps((const float *)y + j),
+                                     _mm256_loadu_ps((const float *)x + j)));
+    }
+    if (rest_ != 0) {
+      j = num_ - block;
+      _mm256_storeu_ps(
+          reinterpret_cast<float *>(z) + j,
+          _mm256_add_ps(tmp, _mm256_loadu_ps((const float *)x + j)));
+    }
+  }
+  void Compute(const framework::ExecutionContext &context) const override {
+    auto win_size = context.Attr<std::vector<int>>("win_size");
+    int pad_value = context.Attr<int>("pad_value");
+    int max_win_size = *std::max_element(win_size.begin(), win_size.end());
+    std::vector<int> num_hash = context.Attr<std::vector<int>>("num_hash");
+    std::vector<int> mod_by = context.Attr<std::vector<int>>("mod_by");
+    PADDLE_ENFORCE(
+        num_hash.size() == mod_by.size() && num_hash.size() == win_size.size(),
+        "All attributes's count should be equal!");
+    const LoDTensor *table1 = context.Input<LoDTensor>("W1");
+    auto table1_dims = table1->dims();
+    auto table1_data = table1->data<T>();
+    const LoDTensor *table0 = context.Input<LoDTensor>("W0");
+    auto table0_dims = table0->dims();
+    auto table0_data = table0->data<T>();
+
+    auto *out = context.Output<LoDTensor>("Out");
+    auto out_data = out->mutable_data<T>(context.GetPlace());
+    auto out_dims = out->dims();
+
+    PADDLE_ENFORCE_EQ(
+        static_cast<uint64_t>(out_dims[1]), table0_dims[1],
+        "The actual output data's size mismatched with table0's width.");
+
+    // auto table_compute =
+    //    jit::Get<jit::kVAdd, jit::XYZNTuples<T>,
+    //    platform::CPUPlace>(std::min(table0_dims[1],table1_dims[1]));
+
+    memset(out_data, 0, out->memory_size());
+
+    int64_t *enum_buf;
+    int ret = posix_memalign(reinterpret_cast<void **>(&enum_buf), 64,
+                             sizeof(int64_t) * max_win_size);
+    PADDLE_ENFORCE_EQ(ret, 0, "Failed to allocate the temporary memory!");
+
+    const char input_names[2][10] = {"X0", "X1"};
+    for (int i = 0; i < 2; i++) {
+      auto *in = context.Input<LoDTensor>(input_names[i]);
       auto in_dims = in->dims();
       auto in_lod = in->lod();
 
@@ -79,135 +100,72 @@ class FusedEnumHashEmdPoolKernel : public framework::OpKernel<T> {
           static_cast<uint64_t>(in_dims[0]), in_lod[0].back(),
           "The actual input data's size mismatched with LoD information.");
 
-      // enumerate
-      int max_win_size = *std::max_element(win_size.begin(), win_size.end());
-      LoDTensor enum_out;
-      enum_out.Resize({in_dims[0], max_win_size});
-
-      // Generate enumerate sequence set
       auto lod0 = in_lod[0];
       auto in_data = in->data<int64_t>();
-      auto enum_out_data = enum_out.mutable_data<int64_t>(context.GetPlace());
 
-      for (size_t i = 0; i < lod0.size() - 1; ++i) {
-        for (size_t idx = lod0[i]; idx < lod0[i + 1]; ++idx) {
-          for (int word_idx = 0; word_idx < max_win_size; ++word_idx) {
-            size_t word_pos = idx + word_idx;
-            enum_out_data[max_win_size * idx + word_idx] =
-                word_pos < lod0[i + 1] ? in_data[word_pos] : pad_value;
+      PADDLE_ENFORCE_EQ(
+          static_cast<uint64_t>(out_dims[0]), lod0.size() - 1,
+          "The actual output data's size mismatched with LoD information.");
+      for (size_t hash_idx = 0; hash_idx < num_hash.size(); hash_idx++) {
+        PADDLE_ENFORCE_EQ(
+            static_cast<uint64_t>(out_dims[1]),
+            num_hash[hash_idx] * table1_dims[1],
+            "The actual output data's size mismatched with table0's width.");
+      }
+
+      int out_offset = 0;
+      for (size_t lod_idx = 0; lod_idx < lod0.size() - 1; lod_idx++) {
+        auto start_pos = lod0[lod_idx];
+        auto end_pos = lod0[lod_idx + 1];
+        auto hash_len = table0_dims[1];
+        for (size_t pos = start_pos; pos < end_pos; pos++) {
+          auto hash_idx = in_data[pos];
+          auto table_offset = hash_idx * hash_len;
+          table_compute(table0_data + table_offset, out_data + out_offset,
+                        out_data + out_offset, hash_len);
+        }
+
+        hash_len = table1_dims[1];
+        for (size_t idx = 0; idx < win_size.size(); idx++) {
+          auto last_dim = win_size[idx];
+          size_t pos = start_pos;
+          if (last_dim < static_cast<int>(end_pos - start_pos)) {
+            while (pos <= end_pos - last_dim) {
+              for (int ihash = 0; ihash != num_hash[idx]; ++ihash) {
+                auto hash_idx =
+                    XXH64(in_data + pos, sizeof(int) * last_dim, ihash);
+                hash_idx %= mod_by[idx];
+                auto hash_offset = ihash * hash_len;
+                auto table_offset = hash_idx * hash_len;
+                table_compute(table1_data + table_offset,
+                              out_data + out_offset + hash_offset,
+                              out_data + out_offset + hash_offset, hash_len);
+              }
+              pos++;
+            }
+          }
+          for (int k = last_dim - (end_pos - pos); k < last_dim; k++) {
+            for (int j = 0; j < last_dim; j++) {
+              enum_buf[j] = j < last_dim - k
+                                ? in_data[end_pos + k - last_dim + j]
+                                : pad_value;
+            }
+            for (int ihash = 0; ihash != num_hash[idx]; ++ihash) {
+              auto hash_idx = XXH64(enum_buf, sizeof(int) * last_dim, ihash);
+              hash_idx %= mod_by[idx];
+              auto hash_offset = ihash * hash_len;
+              auto table_offset = hash_idx * hash_len;
+              table_compute(table1_data + table_offset,
+                            out_data + out_offset + hash_offset,
+                            out_data + out_offset + hash_offset, hash_len);
+            }
           }
         }
-      }
-
-      // hash
-      std::vector<int> num_hash = context.Attr<std::vector<int>>("num_hash");
-      std::vector<int> mod_by = context.Attr<std::vector<int>>("mod_by");
-      PADDLE_ENFORCE(num_hash.size() == mod_by.size() &&
-                         num_hash.size() == win_size.size(),
-                     "All attributes's count should be equal!");
-      auto seq_length = in_dims[0];
-      for (auto hash_len : num_hash) {
-        LoDTensor lod_tensor;
-        lod_tensor.set_lod(in_lod);
-        lod_tensor.Resize({seq_length, hash_len, 1});
-        hash_out.push_back(std::move(lod_tensor));
-      }
-      for (int win_idx = 0; win_idx < win_size.size(); win_idx++) {
-        auto hash_out_data =
-            hash_out[win_idx].mutable_data<int64_t>(context.GetPlace());
-        auto *input = enum_out_data;
-        auto last_dim = win_size[win_idx];
-        for (int idx = 0; idx < seq_length; ++idx) {
-          for (int ihash = 0; ihash != num_hash[win_idx]; ++ihash) {
-            hash_out_data[idx * num_hash[win_idx] + ihash] =
-                XXH64(input, sizeof(int) * last_dim, ihash) % mod_by[win_idx];
-          }
-          input += max_win_size;
-        }
-      }
-
-      // seq_emd_pool
-      EmbeddingVSumFunctor<T> functor;
-      const LoDTensor *table1_var = context.Input<LoDTensor>("W1");
-      auto table1_tz = paddle::framework::vectorize2int(table1_var->dims());
-      for (int idx = 0; idx < num_hash.size(); idx++) {
-        LoDTensor lod_tensor;
-        lod_tensor.set_lod(in_lod);
-        lod_tensor.Resize({static_cast<int>(lod0.size() - 1),
-                           num_hash[idx] * table1_tz.back()});
-        lod_tensor.mutable_data<T>(context.GetPlace());
-        functor(context, table1_var, &hash_out[idx], &lod_tensor);
-        seq_pool_out.push_back(std::move(lod_tensor));
-      }
-
-      {
-        const LoDTensor *table0_var = context.Input<LoDTensor>("W0");
-        auto table0_tz = paddle::framework::vectorize2int(table0_var->dims());
-
-        LoDTensor lod_tensor;
-        lod_tensor.set_lod(in_lod);
-        lod_tensor.Resize(
-            {static_cast<int>(lod0.size() - 1), table0_tz.back()});
-        lod_tensor.mutable_data<T>(context.GetPlace());
-        functor(context, table0_var, in, &lod_tensor);
-        seq_pool_out.push_back(std::move(lod_tensor));
-      }
-
-      // Clear resource
-      hash_out.clear();
-    }
-
-    // sum
-    bool in_place = false;
-    auto &in_vars = seq_pool_out;
-    size_t in_num = in_vars.size();
-
-    auto *out = context.Output<LoDTensor>("Out");
-    if (!in_place) {
-      out->mutable_data<T>(context.GetPlace());
-    }
-    auto result = EigenVector<T>::Flatten(*out);
-    auto &place =
-        *context.template device_context<DeviceContext>().eigen_device();
-    int start = in_place ? 1 : 0;
-    if (!in_place) {
-      if (in_num >= 2) {
-        auto &in_0 = in_vars[0];
-        auto &in_1 = in_vars[1];
-        if (in_0.numel() && in_1.numel()) {
-          auto in_0_e = EigenVector<T>::Flatten(in_0);
-          auto in_1_e = EigenVector<T>::Flatten(in_1);
-          result.device(place) = in_0_e + in_1_e;
-          start = 2;
-        }
-      }
-      if (start != 2) {
-        math::SetConstant<DeviceContext, T> constant_functor;
-        constant_functor(context.template device_context<DeviceContext>(), out,
-                         static_cast<T>(0));
+        out_offset += out_dims[1];
       }
     }
-
-    // If in_place, just skip the first tensor
-    for (size_t i = start; i < in_num; i++) {
-      {
-        auto &in_t = in_vars[i];
-        if (in_t.numel() == 0) {
-          continue;
-        }
-        auto in = EigenVector<T>::Flatten(in_t);
-        result.device(place) = result + in;
-      }
-    }
-
-    // Clear resource
-    seq_pool_out.clear();
+    std::free(enum_buf);
   }
-
- private:
-  mutable std::vector<LoDTensor> hash_out;
-  mutable std::vector<LoDTensor> seq_pool_out;
-  const std::vector<std::string> input_names = {"X0", "X1"};
 };
 
 }  // namespace operators
