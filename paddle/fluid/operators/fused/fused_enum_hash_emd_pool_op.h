@@ -57,10 +57,6 @@ class FusedEnumHashEmdPoolKernel : public framework::OpKernel<T> {
         num_hash.size() == mod_by.size() && num_hash.size() == win_size.size(),
         "All attributes's count should be equal!");
 
-    // auto table_compute =
-    //    jit::Get<jit::kVAdd, jit::XYZNTuples<T>,
-    //    platform::CPUPlace>(std::min(table0_dims[1],table1_dims[1]));
-
     // Zero output meory to prepare for SUM operation in furture.
     std::memset(out_data, 0, out->memory_size());
 
@@ -128,10 +124,10 @@ class FusedEnumHashEmdPoolKernel : public framework::OpKernel<T> {
         auto start_pos = lod0[lod_idx];
         auto end_pos = lod0[lod_idx + 1];
 
-        // According to table0's hash value, it finish the SUM operation with
-        // output's data.
-        auto hash_len = table0_dims[1];
         for (size_t pos = start_pos; pos < end_pos; pos++) {
+          // According to table0's hash value, it finish the SUM operation with
+          // output's data.
+          auto hash_len = table0_dims[1];
           // To calculate the table offset.
           auto hash_idx = enum_buf[pos];
           auto table_offset = hash_idx * hash_len;
@@ -139,24 +135,23 @@ class FusedEnumHashEmdPoolKernel : public framework::OpKernel<T> {
           // To summary the hash value with output data.
           table_compute(table0_data + table_offset, out_data + out_offset,
                         out_data + out_offset, hash_len);
-        }
 
-        // To cacluate the hash of input data and summery table1 with output's
-        // data.
-        hash_len = table1_dims[1];
-        for (size_t idx = 0; idx < win_size.size(); idx++) {
-          auto last_dim = win_size[idx];
-          for (size_t pos = start_pos; pos < end_pos; pos++) {
+          // To cacluate the hash of input data and summery table1 with output's
+          // data.
+          hash_len = table1_dims[1];
+          for (size_t idx = 0; idx < win_size.size(); idx++) {
+            auto last_dim = win_size[idx];
             for (int ihash = 0; ihash != num_hash[idx]; ++ihash) {
+              // To calculate the hash offset.
+              auto hash_offset = ihash * hash_len;
+
               // To change the pos can omit the enumerate opeation via the
               // expanding buffer.
-              auto hash_idx =
-                  XXH64(enum_buf + pos, sizeof(int) * last_dim, ihash) %
-                  mod_by[idx];
+              hash_idx = XXH64(enum_buf + pos, sizeof(int) * last_dim, ihash) %
+                         mod_by[idx];
 
-              // To calculate the hash and table offset.
-              auto hash_offset = ihash * hash_len;
-              auto table_offset = hash_idx * hash_len;
+              // To calculate the table offset.
+              table_offset = hash_idx * hash_len;
 
               // To summary the hash value with output data.
               table_compute(table1_data + table_offset,
