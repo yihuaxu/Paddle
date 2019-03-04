@@ -57,6 +57,13 @@ class FusedEnumHashEmdPoolKernel : public framework::OpKernel<T> {
         num_hash.size() == mod_by.size() && num_hash.size() == win_size.size(),
         "All attributes's count should be equal!");
 
+    auto table0_compute =
+        jit::Get<jit::kVAdd, jit::XYZNTuples<T>, platform::CPUPlace>(
+            table0_dims[1]);
+    auto table1_compute =
+        jit::Get<jit::kVAdd, jit::XYZNTuples<T>, platform::CPUPlace>(
+            table1_dims[1]);
+
     // Zero output meory to prepare for SUM operation in furture.
     std::memset(out_data, 0, out->memory_size());
 
@@ -133,8 +140,8 @@ class FusedEnumHashEmdPoolKernel : public framework::OpKernel<T> {
           auto table_offset = hash_idx * hash_len;
 
           // To summary the hash value with output data.
-          table_compute(table0_data + table_offset, out_data + out_offset,
-                        out_data + out_offset, hash_len);
+          table0_compute(table0_data + table_offset, out_data + out_offset,
+                         out_data + out_offset, hash_len);
 
           // To cacluate the hash of input data and summery table1 with output's
           // data.
@@ -154,9 +161,9 @@ class FusedEnumHashEmdPoolKernel : public framework::OpKernel<T> {
               table_offset = hash_idx * hash_len;
 
               // To summary the hash value with output data.
-              table_compute(table1_data + table_offset,
-                            out_data + out_offset + hash_offset,
-                            out_data + out_offset + hash_offset, hash_len);
+              table1_compute(table1_data + table_offset,
+                             out_data + out_offset + hash_offset,
+                             out_data + out_offset + hash_offset, hash_len);
             }
           }
         }
@@ -168,41 +175,6 @@ class FusedEnumHashEmdPoolKernel : public framework::OpKernel<T> {
     if (enum_buf != NULL) {
       std::free(enum_buf);
     }
-  }
-
- private:
-  // Since the jit kernel(named as jit::kVAdd)'s accuracy issue, re-implement
-  // it.
-  inline void table_compute(const T *x, T *y, T *z, int n) const {
-#ifdef __AVX__
-    const size_t block = YMM_FLOAT_BLOCK;
-    const size_t num_ = n;
-    const size_t rest_ = num_ % block;
-    const size_t end_ = num_ - rest_;
-
-    __m256 tmp;
-    size_t offset;
-    if (rest_ != 0) {
-      offset = num_ - block;
-      tmp = _mm256_loadu_ps((const float *)y + offset);
-    }
-    for (offset = 0; offset < end_; offset += block) {
-      _mm256_storeu_ps(
-          reinterpret_cast<float *>(z) + offset,
-          _mm256_add_ps(_mm256_loadu_ps((const float *)y + offset),
-                        _mm256_loadu_ps((const float *)x + offset)));
-    }
-    if (rest_ != 0) {
-      offset = num_ - block;
-      _mm256_storeu_ps(
-          reinterpret_cast<float *>(z) + offset,
-          _mm256_add_ps(tmp, _mm256_loadu_ps((const float *)x + offset)));
-    }
-#else
-    for (int offset = 0; offset < n; offset++) {
-      z[offset] = x[offset] + y[offset];
-    }
-#endif
   }
 };
 
