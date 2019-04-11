@@ -13,6 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/fluid/operators/teacher_student_sigmoid_loss_op.h"
+
+#include <memory>
+
 #include "paddle/fluid/operators/math/math_function.h"
 
 namespace paddle {
@@ -52,6 +55,28 @@ class TeacherStudentSigmoidLossOp : public framework::OperatorWithKernel {
       const framework::ExecutionContext& ctx) const override {
     return framework::OpKernelType(ctx.Input<Tensor>("X")->type(),
                                    ctx.device_context());
+  }
+};
+
+class TeacherStudentSigmoidLossGradOpDescMaker
+    : public framework::SingleGradOpDescMaker {
+ public:
+  using framework::SingleGradOpDescMaker::SingleGradOpDescMaker;
+
+ protected:
+  std::unique_ptr<framework::OpDesc> Apply() const override {
+    std::unique_ptr<framework::OpDesc> op(new framework::OpDesc());
+
+    op->SetType("teacher_student_sigmoid_loss_grad");
+
+    op->SetInput("X", Input("X"));
+    op->SetInput("Label", Input("Label"));
+    op->SetInput(framework::GradVarName("Y"), OutputGrad("Y"));
+
+    op->SetOutput(framework::GradVarName("X"), InputGrad("X"));
+
+    op->SetAttrMap(Attrs());
+    return op;
   }
 };
 
@@ -117,11 +142,11 @@ class TeacherStudentSigmoidLossOpMaker
               "[N x 1]. The teacher student sigmoid loss.");
     AddAttr<float>(
         "soft_max_up_bound",
-        "fp32, if input > soft_max_up_bound, will be bound, default 15.0")
+        "fp32, if input > soft_max_up_bound, input will be bound, default 15.0")
         .SetDefault(15.0);
-    AddAttr<float>(
-        "soft_max_lower_bound",
-        "fp32, if input < soft_max_lower_bound, will be bound, default -15.0")
+    AddAttr<float>("soft_max_lower_bound",
+                   "fp32, if input < soft_max_lower_bound, input will be "
+                   "bound, default -15.0")
         .SetDefault(-15.0);
     AddComment(R"DOC(
 TeacherStudentSigmoidLoss Operator.
@@ -134,7 +159,7 @@ we add another label(z') to original.
         label = {-2, -1, [0, 2]}
         when z' is not exist, clk = 0 : label = -2;
         when z' is not exist, clk = 1 : label = -1;
-        when z' is exist    , clk = 0 : label = 0 + z';
+        when z' is exist , clk = 0 : label = 0 + z';
         when z' is exist    , clk = 1 : label = 1 + z';
 
 )DOC");
@@ -148,7 +173,7 @@ namespace ops = paddle::operators;
 REGISTER_OPERATOR(teacher_student_sigmoid_loss,
                   ops::TeacherStudentSigmoidLossOp,
                   ops::TeacherStudentSigmoidLossOpMaker,
-                  paddle::framework::DefaultGradOpDescMaker<true>);
+                  ops::TeacherStudentSigmoidLossGradOpDescMaker);
 
 REGISTER_OPERATOR(teacher_student_sigmoid_loss_grad,
                   ops::TeacherStudentSigmoidLossGradientOp);
