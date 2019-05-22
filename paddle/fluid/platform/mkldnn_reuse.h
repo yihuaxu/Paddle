@@ -19,6 +19,7 @@ limitations under the License. */
 #include "boost/optional.hpp"
 #include "paddle/fluid/framework/data_layout_transform.h"
 #include "paddle/fluid/framework/operator.h"
+#include "paddle/fluid/platform/cpu_info.h"
 #include "paddle/fluid/platform/mkldnn_helper.h"
 #include "paddle/fluid/platform/place.h"
 
@@ -164,6 +165,32 @@ class MKLDNNHandler {
         target_memory_p = std::make_shared<mkldnn::memory>(mpd);
         std::shared_ptr<mkldnn::reorder> reorder_p;
         if (is_INT8) {
+          // TODO(yihua):
+          //  To fix the reorder's adj_scale issue of mkldnn v0.18, it need be
+          //  removed when upgraded mkldnn.
+          if (!platform::MayIUse(platform::avx512_core_vnni)) {
+            bool need_scale = false;
+            for (auto pd : {mpd, user_mpd}) {
+              switch (pd.desc().data.format) {
+                case mkldnn_format_undef:
+                case mkldnn_any:
+                case mkldnn_hwio_s8s8:
+                case mkldnn_hwigo_s8s8:
+                case mkldnn_gOIhw4i16o4i_s8s8:
+                case mkldnn_OIhw4i16o4i_s8s8:
+                case mkldnn_Goihw16g_s8s8:
+                  need_scale = true;
+                  break;
+                default:
+                  break;
+              }
+            }
+            if (need_scale) {
+              for (size_t i = 0; i < scale_data.size(); i++) {
+                scale_data[i] *= 2.0f;
+              }
+            }
+          }
           mkldnn::primitive_attr
               attri;  // attribute for int8 weights and bias data reorder.
           attri.set_output_scales(mask, scale_data);
