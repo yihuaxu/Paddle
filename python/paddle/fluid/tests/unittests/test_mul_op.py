@@ -24,11 +24,14 @@ class TestMulOp(OpTest):
     def setUp(self):
         self.op_type = "mul"
         self.dtype = np.float32
+        self.use_mkldnn = False
         self.init_dtype_type()
+        self.init_kernel_type()
         self.inputs = {
             'X': np.random.random((2, 5)).astype(self.dtype),
             'Y': np.random.random((5, 3)).astype(self.dtype)
         }
+        self.attrs = {"use_mkldnn": self.use_mkldnn, }
         self.outputs = {'Out': np.dot(self.inputs['X'], self.inputs['Y'])}
 
     def init_dtype_type(self):
@@ -48,23 +51,29 @@ class TestMulOp(OpTest):
         self.check_grad(
             ['X'], 'Out', max_relative_error=0.5, no_grad_set=set('Y'))
 
+    def init_kernel_type(self):
+        pass
+
 
 class TestMulOp2(OpTest):
     def setUp(self):
         self.op_type = "mul"
         self.dtype = np.float32
+        self.use_mkldnn = False
         self.init_dtype_type()
+        self.init_kernel_type()
         self.inputs = {
-            'X': np.random.random((3, 4, 4, 3)).astype(self.dtype),
+            'X': np.random.random((3, 5, 4, 3)).astype(self.dtype),
             'Y': np.random.random((2, 6, 1, 2, 3)).astype(self.dtype)
         }
         self.attrs = {
             'x_num_col_dims': 2,
             'y_num_col_dims': 2,
+            "use_mkldnn": self.use_mkldnn,
         }
-        result = np.dot(self.inputs['X'].reshape(3 * 4, 4 * 3),
+        result = np.dot(self.inputs['X'].reshape(3 * 5, 4 * 3),
                         self.inputs['Y'].reshape(2 * 6, 1 * 2 * 3))
-        result = result.reshape(3, 4, 1, 2, 3)
+        result = result.reshape(3, 5, 1, 2, 3)
         self.outputs = {'Out': result}
 
     def init_dtype_type(self):
@@ -83,6 +92,9 @@ class TestMulOp2(OpTest):
     def test_check_grad_ignore_y(self):
         self.check_grad(
             ['X'], 'Out', max_relative_error=0.5, no_grad_set=set('Y'))
+
+    def init_kernel_type(self):
+        pass
 
 
 @unittest.skipIf(not core.is_compiled_with_cuda(),
