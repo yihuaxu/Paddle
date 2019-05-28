@@ -60,6 +60,11 @@ class QuantOpKernel : public framework::OpKernel<T> {
     const T* input_data = input->data<T>();
 
     bool is_negative = ctx.Attr<bool>("is_negative_input");
+    const T* min_value =
+        std::min_element(input_data, input_data + input->numel());
+    if (*min_value >= 0) {
+      is_negative = false;
+    }
     std::string key = CreateKey(ctx, src_tz, scale_data, is_negative);
     const std::string key_prim = key + "@reorder_p";
     const std::string key_src_mem = key + "@src_mem";
