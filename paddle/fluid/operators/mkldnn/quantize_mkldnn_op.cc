@@ -59,7 +59,7 @@ class QuantOpKernel : public framework::OpKernel<T> {
 
     const T* input_data = input->data<T>();
 
-    bool is_negative = ctx.Attr<bool>("is_negative_input");
+    bool is_negative = true;
     const T* min_value =
         std::min_element(input_data, input_data + input->numel());
     if (*min_value >= 0) {
