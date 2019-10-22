@@ -191,7 +191,7 @@ int main(int argc, char *argv[]) {
       memcpy(static_cast<void *>(y_data), inputs[iter][1].data.data(),
              inputs[iter][1].data.length());
       clock_t t1 = clock();
-      executor.Run(*train_program, &scope, 0, false, true);
+      executor.Run(*train_program, &scope, 0, false, true, {}, true);
       clock_t t2 = clock();
       std::cout
           << "pass: " << epoch << " step: " << iter << " loss: "
