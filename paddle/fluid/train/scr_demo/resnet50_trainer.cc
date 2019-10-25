@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <time.h>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -30,11 +30,17 @@
 
 #include "tester_helper.h"
 
+using namespace std;
+
 DEFINE_string(train_data, "", "data file");
 DEFINE_int32(batch_size, 1, "batch size");
-DECLARE_bool(profile);
+DEFINE_bool(profile, false, "enable profile");
 DEFINE_int32(iterations, 0, "number of batches to process");
 DEFINE_int32(epochs, 0, "number of batches to process");
+DEFINE_bool(use_ngraph, false, "Use NGRAPH to run");
+DEFINE_string(ngraph_backend, "CPU", "Select NGRAPH backend (CPU/NNP/NNP_SIM)");
+DEFINE_bool(ngraph_use_pipeline, false, "Use ngraph pipelining");
+DEFINE_uint64(ngraph_pipeline_depth, 2, "depth of the pipeline.");
 
 namespace paddle {
 namespace train {
@@ -139,6 +145,15 @@ void SetInput(std::vector<std::vector<PaddleTensor>> *inputs,
 int main(int argc, char *argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
+  std::vector<std::string> flags;
+  flags.push_back("--use_ngraph=" + std::to_string(FLAGS_use_ngraph));
+  flags.push_back("--ngraph_backend=" + FLAGS_ngraph_backend);
+  flags.push_back("--ngraph_use_pipeline=" +
+                  std::to_string(FLAGS_ngraph_use_pipeline));
+  flags.push_back("--ngraph_pipeline_depth=" +
+                  std::to_string(FLAGS_ngraph_pipeline_depth));
+  paddle::framework::InitGflags(flags);
+
   paddle::framework::InitDevices(false);
 
   const auto cpu_place = paddle::platform::CPUPlace();
@@ -152,6 +167,8 @@ int main(int argc, char *argv[]) {
   auto startup_program = paddle::train::Load(&executor, "startup_program");
   auto train_program = paddle::train::Load(&executor, "main_program");
 
+  // TODO:
+  //   Need fix the issue it can not get the loss value when use ngraph.
   std::string loss_name = "";
   for (auto op_desc : train_program->Block(0).AllOps()) {
     if (op_desc->Type() == "mean") {
@@ -182,7 +199,9 @@ int main(int argc, char *argv[]) {
 
   paddle::platform::ProfilerState pf_state;
   pf_state = paddle::platform::ProfilerState::kCPU;
-  paddle::platform::EnableProfiler(pf_state);
+  if (FLAGS_profile) {
+    paddle::platform::EnableProfiler(pf_state);
+  }
 
   for (unsigned int epoch = 0; epoch < FLAGS_epochs; epoch++) {
     for (unsigned int iter = 0; iter < FLAGS_iterations; iter++) {
@@ -190,17 +209,24 @@ int main(int argc, char *argv[]) {
              inputs[iter][0].data.length());
       memcpy(static_cast<void *>(y_data), inputs[iter][1].data.data(),
              inputs[iter][1].data.length());
-      clock_t t1 = clock();
+      auto begin = chrono::duration_cast<chrono::milliseconds>(
+                       chrono::steady_clock::now().time_since_epoch())
+                       .count();
       executor.Run(*train_program, &scope, 0, false, true, {}, true);
-      clock_t t2 = clock();
+      auto end = chrono::duration_cast<chrono::milliseconds>(
+                     chrono::steady_clock::now().time_since_epoch())
+                     .count();
       std::cout
           << "pass: " << epoch << " step: " << iter << " loss: "
-          << loss_var->Get<paddle::framework::LoDTensor>().data<float>()[0]
-          << " duration: " << (t2 - t1) * clk_coeff << " ms" << std::endl;
+          //              <<
+          //              loss_var->Get<paddle::framework::LoDTensor>().data<float>()[0]
+          << " duration: " << (end - begin) << " ms" << std::endl;
     }
   }
 
-  paddle::platform::DisableProfiler(paddle::platform::EventSortingKey::kTotal,
-                                    "run_paddle_op_profiler");
+  if (FLAGS_profile) {
+    paddle::platform::DisableProfiler(paddle::platform::EventSortingKey::kTotal,
+                                      "run_paddle_op_profiler");
+  }
   return 0;
 }
