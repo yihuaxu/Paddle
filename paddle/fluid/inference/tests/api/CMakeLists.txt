@@ -309,3 +309,5 @@ if(WITH_MKLDNN)
             EXTRA_DEPS ${INFERENCE_EXTRA_DEPS} paddle_fluid_c
             ARGS --infer_model=${INT8_DATA_DIR}/resnet50/model)
  endif()
+ 
+add_subdirectory(scr_demo)

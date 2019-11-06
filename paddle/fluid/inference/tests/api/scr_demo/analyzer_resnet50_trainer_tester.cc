@@ -26,46 +26,23 @@
 #include "paddle/fluid/platform/init.h"
 #include "paddle/fluid/platform/place.h"
 #include "paddle/fluid/platform/profiler.h"
-#include "paddle_api.h"
-
-#include "tester_helper.h"
 
 using namespace std;
 
+#include "paddle/fluid/inference/tests/api/tester_helper.h"
+
+#include <gtest/gtest.h>
+
 DEFINE_string(train_data, "", "data file");
-DEFINE_int32(batch_size, 1, "batch size");
-DEFINE_bool(profile, false, "enable profile");
-DEFINE_int32(iterations, 0, "number of batches to process");
-DEFINE_int32(epochs, 0, "number of batches to process");
-DEFINE_bool(use_ngraph, false, "Use NGRAPH to run");
-DEFINE_string(ngraph_backend, "CPU", "Select NGRAPH backend (CPU/NNP/NNP_SIM)");
-DEFINE_bool(ngraph_use_pipeline, false, "Use ngraph pipelining");
-DEFINE_uint64(ngraph_pipeline_depth, 2, "depth of the pipeline.");
+DEFINE_int32(epochs, 1, "number of batches to process");
+DECLARE_bool(profile);
+DECLARE_bool(use_ngraph);
+DECLARE_string(ngraph_backend);
+DECLARE_bool(ngraph_use_pipeline);
+DECLARE_uint64(ngraph_pipeline_depth);
 
 namespace paddle {
-namespace train {
-
-void ReadBinaryFile(const std::string &filename, std::string *contents) {
-  std::ifstream fin(filename, std::ios::in | std::ios::binary);
-  PADDLE_ENFORCE(static_cast<bool>(fin), "Cannot open file %s", filename);
-  fin.seekg(0, std::ios::end);
-  contents->clear();
-  contents->resize(fin.tellg());
-  fin.seekg(0, std::ios::beg);
-  fin.read(&(contents->at(0)), contents->size());
-  fin.close();
-}
-
-std::unique_ptr<paddle::framework::ProgramDesc> Load(
-    paddle::framework::Executor *executor, const std::string &model_filename) {
-  VLOG(3) << "loading model from " << model_filename;
-  std::string program_desc_str;
-  ReadBinaryFile(model_filename, &program_desc_str);
-
-  std::unique_ptr<paddle::framework::ProgramDesc> main_program(
-      new paddle::framework::ProgramDesc(program_desc_str));
-  return main_program;
-}
+namespace inference {
 
 template <typename T>
 class TensorReader {
@@ -134,45 +111,51 @@ void SetInput(std::vector<std::vector<PaddleTensor>> *inputs,
   for (auto i = 0; i < iterations; i++) {
     auto images = image_reader.NextBatch();
     auto labels = label_reader.NextBatch();
-    inputs->emplace_back(
-        std::vector<PaddleTensor>{std::move(images), std::move(labels)});
+    inputs->emplace_back(std::vector<paddle::PaddleTensor>{std::move(images),
+                                                           std::move(labels)});
   }
 }
 
-}  // namespace train
+std::unique_ptr<paddle::framework::ProgramDesc> Load(
+    paddle::framework::Executor *executor, const std::string &model_filename) {
+  VLOG(3) << "loading model from " << model_filename;
+  std::string program_desc_str;
+  ReadBinaryFile(model_filename, &program_desc_str);
+
+  std::unique_ptr<paddle::framework::ProgramDesc> main_program(
+      new paddle::framework::ProgramDesc(program_desc_str));
+  return main_program;
+}
+
+}  // namespace inference
 }  // namespace paddle
 
-int main(int argc, char *argv[]) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-
-  std::vector<std::string> flags;
-  flags.push_back("--use_ngraph=" + std::to_string(FLAGS_use_ngraph));
-  flags.push_back("--ngraph_backend=" + FLAGS_ngraph_backend);
-  flags.push_back("--ngraph_use_pipeline=" +
-                  std::to_string(FLAGS_ngraph_use_pipeline));
-  flags.push_back("--ngraph_pipeline_depth=" +
-                  std::to_string(FLAGS_ngraph_pipeline_depth));
-  paddle::framework::InitGflags(flags);
-
+TEST(Analyzer_scr_demo, resnet50) {
   paddle::framework::InitDevices(false);
 
   const auto cpu_place = paddle::platform::CPUPlace();
 
   // read data from file and prepare batches with test data
   std::vector<std::vector<paddle::PaddleTensor>> inputs;
-  paddle::train::SetInput(&inputs);
+  paddle::inference::SetInput(&inputs);
 
   paddle::framework::Executor executor(cpu_place);
   paddle::framework::Scope scope;
-  auto startup_program = paddle::train::Load(&executor, "startup_program");
-  auto train_program = paddle::train::Load(&executor, "main_program");
+  auto startup_program = paddle::inference::Load(&executor, "startup_program");
+  auto train_program = paddle::inference::Load(&executor, "main_program");
 
-  // TODO:
-  //   Need fix the issue it can not get the loss value when use ngraph.
   std::string loss_name = "";
   for (auto op_desc : train_program->Block(0).AllOps()) {
     if (op_desc->Type() == "mean") {
       loss_name = op_desc->Output("Out")[0];
+      if (FLAGS_use_ngraph) {
+        auto var_desc = const_cast<paddle::framework::BlockDesc *>(
+                            &(train_program->Block(0)))
+                            ->Var(loss_name);
+        if (var_desc) {
+          var_desc->SetPersistable(true);
+        }
+      }
       break;
     }
   }
@@ -180,7 +163,13 @@ int main(int argc, char *argv[]) {
   PADDLE_ENFORCE_NE(loss_name, "", "loss not found");
 
   // init all parameters
-  executor.Run(*startup_program, &scope, 0);
+  if (FLAGS_use_ngraph) {
+    FLAGS_use_ngraph = false;
+    executor.Run(*startup_program, &scope, 0);
+    FLAGS_use_ngraph = true;
+  } else {
+    executor.Run(*startup_program, &scope, 0);
+  }
 
   // prepare data
   auto x_var = scope.Var("data");
@@ -194,8 +183,6 @@ int main(int argc, char *argv[]) {
   auto y_tensor = y_var->GetMutable<paddle::framework::LoDTensor>();
   y_tensor->Resize({FLAGS_batch_size, 1});
   auto y_data = y_tensor->mutable_data<int64_t>(cpu_place);
-
-  constexpr auto clk_coeff = 1000.0 / CLOCKS_PER_SEC;
 
   paddle::platform::ProfilerState pf_state;
   pf_state = paddle::platform::ProfilerState::kCPU;
@@ -218,8 +205,7 @@ int main(int argc, char *argv[]) {
                      .count();
       std::cout
           << "pass: " << epoch << " step: " << iter << " loss: "
-          //              <<
-          //              loss_var->Get<paddle::framework::LoDTensor>().data<float>()[0]
+          << loss_var->Get<paddle::framework::LoDTensor>().data<float>()[0]
           << " duration: " << (end - begin) << " ms" << std::endl;
     }
   }
@@ -228,5 +214,4 @@ int main(int argc, char *argv[]) {
     paddle::platform::DisableProfiler(paddle::platform::EventSortingKey::kTotal,
                                       "run_paddle_op_profiler");
   }
-  return 0;
 }
